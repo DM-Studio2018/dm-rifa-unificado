@@ -1,22 +1,17 @@
 <?php
 /**
  * Plugin Name: DM Rifa Unificado
- * Plugin URI: https://github.com/tu-usuario/dm-rifa-unificado
  * Description: Selector de números, reservas y página de confirmación con WhatsApp + panel de gestión en el admin (todo en un solo plugin).
- * Version: 1.0.1
+ * Version: 1.1.0
  * Author: DM Studio SAS
- * Author URI: https://dm-studio.com
  * License: GPL2
- * License URI: https://www.gnu.org/licenses/gpl-2.0.html
- * Text Domain: dm-rifa-unificado
- * Domain Path: /languages
  */
 
 if ( ! defined('ABSPATH') ) { exit; }
 
 class DM_Rifa_Unificado {
     private static $instance = null;
-    private $version = '1.0.1';
+    private $version = '1.1.0';
     private $tbl_rifas;
     private $tbl_numeros;
     private $tbl_reservas;
@@ -43,8 +38,8 @@ class DM_Rifa_Unificado {
         add_action('wp_ajax_dm_rifa_reservar', array($this, 'ajax_reservar'));
         add_action('wp_ajax_nopriv_dm_rifa_reservar', array($this, 'ajax_reservar'));
 
-        add_action('admin_post_dm_rifa_admin_numbers', array($this, 'admin_post_numbers'));
         add_action('admin_post_dm_rifa_export_csv', array($this, 'admin_post_export_csv'));
+        add_action('admin_post_dm_rifa_update_reserva', array($this, 'admin_post_update_reserva'));
     }
 
     public function on_activate() {
@@ -80,7 +75,6 @@ class DM_Rifa_Unificado {
             PRIMARY KEY (id)
         ) $charset;";
 
-        // Agregamos columna token + índice para enmascarar la confirmación
         $sql_reservas = "CREATE TABLE {$this->tbl_reservas} (
             id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
             rifa_id BIGINT UNSIGNED NOT NULL,
@@ -106,7 +100,6 @@ class DM_Rifa_Unificado {
 
     /* ---------------------- Assets ---------------------- */
     public function enqueue_front() {
-        // Solo carga JS/CSS si la página contiene nuestros shortcodes
         if ( is_singular() ) {
             global $post;
             if ( $post && ( has_shortcode($post->post_content, 'rifa_selector') || has_shortcode($post->post_content, 'rifa_confirm') ) ) {
@@ -137,7 +130,6 @@ class DM_Rifa_Unificado {
             'DM Rifas', 'DM Rifas', 'manage_options', 'dm-rifa',
             array($this, 'page_rifas'), 'dashicons-tickets', 25
         );
-        add_submenu_page('dm-rifa', 'Gestionar Números', 'Gestionar Números', 'manage_options', 'dm-rifa-numeros', array($this, 'page_numeros'));
         add_submenu_page('dm-rifa', 'Compradores', 'Compradores', 'manage_options', 'dm-rifa-compradores', array($this, 'page_compradores'));
     }
 
@@ -159,7 +151,6 @@ class DM_Rifa_Unificado {
         return $wpdb->get_row($wpdb->prepare("SELECT * FROM {$this->tbl_reservas} WHERE id = %d", $id));
     }
 
-    // NUEVO: obtener reserva por token (para no exponer el ID)
     private function fetch_reserva_by_token($token) {
         global $wpdb;
         $token = sanitize_text_field($token);
@@ -167,6 +158,38 @@ class DM_Rifa_Unificado {
         return $wpdb->get_row(
             $wpdb->prepare("SELECT * FROM {$this->tbl_reservas} WHERE token = %s LIMIT 1", $token)
         );
+    }
+
+    // Calcular el estado real de una reserva basado en el estado de sus números
+    private function calcular_estado_reserva($reserva, $rifa_id) {
+        global $wpdb;
+        
+        $numeros_arr = array_map('trim', explode(',', $reserva->numeros_csv));
+        if (empty($numeros_arr)) return 'reservado';
+        
+        $place = implode(',', array_fill(0, count($numeros_arr), '%s'));
+        $estados = $wpdb->get_col($wpdb->prepare(
+            "SELECT DISTINCT estado FROM {$this->tbl_numeros} WHERE rifa_id = %d AND numero IN ($place)",
+            array_merge(array($rifa_id), $numeros_arr)
+        ));
+        
+        // Si todos están pagados
+        if (count($estados) === 1 && $estados[0] === 'pagado') {
+            return 'pagado';
+        }
+        
+        // Si hay al menos uno pagado y otros reservados (pago parcial)
+        if (in_array('pagado', $estados) && in_array('reservado', $estados)) {
+            return 'pago parcial';
+        }
+        
+        // Si hay alguno disponible (fue liberado)
+        if (in_array('disponible', $estados)) {
+            return 'parcialmente liberado';
+        }
+        
+        // Por defecto, reservado
+        return 'reservado';
     }
 
     /* ---------------------- Admin: Rifas ---------------------- */
@@ -201,7 +224,6 @@ class DM_Rifa_Unificado {
 
             $rifa_id = intval($wpdb->insert_id);
             if ($rifa_id > 0 && $total > 0) {
-                // Poblar números
                 $values = array();
                 for ($i = 0; $i < $total; $i++) {
                     $values[] = $wpdb->prepare("(%d,%s,'disponible',NULL,NOW())", $rifa_id, $this->pad3($i));
@@ -216,7 +238,6 @@ class DM_Rifa_Unificado {
             }
         }
 
-        // Listado simple
         $rifas = $wpdb->get_results("SELECT * FROM {$this->tbl_rifas} ORDER BY id DESC");
         ?>
         <div class="wrap">
@@ -260,8 +281,7 @@ class DM_Rifa_Unificado {
                         <td><?php echo esc_html($r->wa_e164); ?></td>
                         <td><code>[rifa_selector id="<?php echo esc_attr($r->id); ?>"]</code></td>
                         <td>
-                            <a class="button" href="<?php echo admin_url('admin.php?page=dm-rifa-numeros&rifa_id='.intval($r->id)); ?>">Gestionar números</a>
-                            <a class="button" href="<?php echo admin_url('admin.php?page=dm-rifa-compradores&rifa_id='.intval($r->id)); ?>">Compradores</a>
+                            <a class="button" href="<?php echo admin_url('admin.php?page=dm-rifa-compradores&rifa_id='.intval($r->id)); ?>">Ver compradores</a>
                         </td>
                     </tr>
                 <?php endforeach; else: ?>
@@ -273,121 +293,41 @@ class DM_Rifa_Unificado {
         <?php
     }
 
-    /* ---------------------- Admin: Números ---------------------- */
-    public function page_numeros() {
-        if ( ! current_user_can('manage_options') ) { return; }
-        global $wpdb;
-        $rifa_id = intval($_GET['rifa_id'] ?? 0);
-        if (!$rifa_id) {
-            echo '<div class="wrap"><h1>Gestionar Números</h1><p>Selecciona una rifa desde el listado.</p></div>';
-            return;
-        }
-        $rifa = $this->fetch_rifa($rifa_id);
-        if (!$rifa) {
-            echo '<div class="wrap"><h1>Gestionar Números</h1><p>Rifa no encontrada.</p></div>';
-            return;
-        }
-
-        // Filtros
-        $estado = sanitize_text_field($_GET['estado'] ?? '');
-        $buscar = sanitize_text_field($_GET['buscar'] ?? '');
-
-        $where = $wpdb->prepare("WHERE rifa_id = %d", $rifa_id);
-        if ($estado && in_array($estado, array('disponible','reservado','pagado'))) {
-            $where .= $wpdb->prepare(" AND estado = %s", $estado);
-        }
-        if ($buscar !== '') {
-            $buscar = strtoupper($buscar);
-            $where .= $wpdb->prepare(" AND numero = %s", $buscar);
-        }
-        $nums = $wpdb->get_results("SELECT * FROM {$this->tbl_numeros} $where ORDER BY numero ASC LIMIT 5000");
-
-        ?>
-        <div class="wrap">
-            <h1>Gestionar Números – <?php echo esc_html($rifa->nombre); ?></h1>
-            <form method="get" class="dm-filters">
-                <input type="hidden" name="page" value="dm-rifa-numeros">
-                <input type="hidden" name="rifa_id" value="<?php echo esc_attr($rifa_id); ?>">
-                <select name="estado">
-                    <option value="">Todos</option>
-                    <option value="disponible" <?php selected($estado,'disponible'); ?>>Disponibles</option>
-                    <option value="reservado" <?php selected($estado,'reservado'); ?>>Reservados</option>
-                    <option value="pagado" <?php selected($estado,'pagado'); ?>>Pagados</option>
-                </select>
-                <input type="text" name="buscar" value="<?php echo esc_attr($buscar); ?>" placeholder="Buscar ej. 023" style="width:120px">
-                <button class="button">Filtrar</button>
-                <a class="button" href="<?php echo esc_url(admin_url('admin.php?page=dm-rifa-numeros&rifa_id='.$rifa_id)); ?>">Limpiar</a>
-            </form>
-
-            <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
-                <?php wp_nonce_field('dm_rifa_admin_numbers'); ?>
-                <input type="hidden" name="action" value="dm_rifa_admin_numbers">
-                <input type="hidden" name="rifa_id" value="<?php echo esc_attr($rifa_id); ?>">
-                <div style="margin:10px 0;">
-                    <button class="button" name="cambiar_estado" value="reservado">Marcar Reservado</button>
-                    <button class="button" name="cambiar_estado" value="pagado">Marcar Pagado</button>
-                    <button class="button" name="cambiar_estado" value="disponible">Liberar (Disponible)</button>
-                </div>
-                <table class="widefat striped">
-                    <thead><tr><th><input type="checkbox" id="dm-checkall"></th><th>Número</th><th>Estado</th><th>Reserva</th><th>Actualizado</th></tr></thead>
-                    <tbody>
-                    <?php if ($nums): foreach($nums as $n): ?>
-                        <tr>
-                            <td><input type="checkbox" name="ids[]" value="<?php echo esc_attr($n->id); ?>"></td>
-                            <td><strong><?php echo esc_html($n->numero); ?></strong></td>
-                            <td><?php echo esc_html($n->estado); ?></td>
-                            <td><?php echo $n->reserva_id ? intval($n->reserva_id) : '-'; ?></td>
-                            <td><?php echo esc_html($n->updated_at); ?></td>
-                        </tr>
-                    <?php endforeach; else: ?>
-                        <tr><td colspan="5">No hay resultados.</td></tr>
-                    <?php endif; ?>
-                    </tbody>
-                </table>
-            </form>
-        </div>
-        <?php
-    }
-
-    public function admin_post_numbers() {
-        if ( ! current_user_can('manage_options') ) { wp_die('Permisos insuficientes'); }
-        check_admin_referer('dm_rifa_admin_numbers');
-        global $wpdb;
-        $rifa_id = intval($_POST['rifa_id'] ?? 0);
-        $estado  = sanitize_text_field($_POST['cambiar_estado'] ?? '');
-        $ids     = array_map('intval', $_POST['ids'] ?? array());
-        if (!$rifa_id || !in_array($estado, array('disponible','reservado','pagado')) || empty($ids)) {
-            wp_redirect(admin_url('admin.php?page=dm-rifa-numeros&rifa_id='.$rifa_id));
-            exit;
-        }
-        $place = implode(',', array_fill(0, count($ids), '%d'));
-        // Si liberamos, quitamos reserva_id también
-        if ($estado === 'disponible') {
-            $wpdb->query($wpdb->prepare("UPDATE {$this->tbl_numeros} SET estado = %s, reserva_id = NULL, updated_at = NOW() WHERE id IN ($place)", array_merge(array($estado), $ids)));
-        } else {
-            $wpdb->query($wpdb->prepare("UPDATE {$this->tbl_numeros} SET estado = %s, updated_at = NOW() WHERE id IN ($place)", array_merge(array($estado), $ids)));
-        }
-        wp_redirect(admin_url('admin.php?page=dm-rifa-numeros&rifa_id='.$rifa_id));
-        exit;
-    }
-
     /* ---------------------- Admin: Compradores ---------------------- */
     public function page_compradores() {
         if ( ! current_user_can('manage_options') ) { return; }
         global $wpdb;
         $rifa_id = intval($_GET['rifa_id'] ?? 0);
+        $view_reserva = intval($_GET['view'] ?? 0);
 
         $rifas = $wpdb->get_results("SELECT id,nombre FROM {$this->tbl_rifas} ORDER BY id DESC");
-        if (!$rifas) { echo '<div class="wrap"><h1>Compradores</h1><p>Primero crea una rifa.</p></div>'; return; }
+        if (!$rifas) { 
+            echo '<div class="wrap"><h1>Compradores</h1><p>Primero crea una rifa.</p></div>'; 
+            return; 
+        }
 
         if (!$rifa_id) { $rifa_id = intval($rifas[0]->id); }
+        $rifa = $this->fetch_rifa($rifa_id);
 
+        // Vista detalle de una reserva
+        if ($view_reserva > 0) {
+            $this->render_reserva_detail($view_reserva, $rifa_id);
+            return;
+        }
+
+        // Lista de compradores con estado calculado en tiempo real
         $res = $wpdb->get_results($wpdb->prepare("SELECT * FROM {$this->tbl_reservas} WHERE rifa_id = %d ORDER BY id DESC", $rifa_id));
+        
+        // Calcular el estado real de cada reserva basado en sus números
+        foreach($res as $reserva) {
+            $reserva->status_real = $this->calcular_estado_reserva($reserva, $rifa_id);
+        }
+        
         $export_url = wp_nonce_url(admin_url('admin-post.php?action=dm_rifa_export_csv&rifa_id='.$rifa_id), 'dm_rifa_export_csv');
 
         ?>
         <div class="wrap">
-            <h1>Compradores</h1>
+            <h1>Compradores - <?php echo esc_html($rifa->nombre); ?></h1>
             <form method="get" style="margin:10px 0;">
                 <input type="hidden" name="page" value="dm-rifa-compradores">
                 <select name="rifa_id">
@@ -400,7 +340,19 @@ class DM_Rifa_Unificado {
             </form>
 
             <table class="widefat striped">
-                <thead><tr><th>ID</th><th>Nombre</th><th>Email</th><th>Teléfono</th><th>Números</th><th>Total</th><th>Estatus</th><th>Creado</th><th>Vence</th></tr></thead>
+                <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>Nombre</th>
+                        <th>Email</th>
+                        <th>Teléfono</th>
+                        <th>Números</th>
+                        <th>Total</th>
+                        <th>Estatus</th>
+                        <th>Creado</th>
+                        <th>Acciones</th>
+                    </tr>
+                </thead>
                 <tbody>
                 <?php if ($res): foreach($res as $row): ?>
                     <tr>
@@ -410,9 +362,19 @@ class DM_Rifa_Unificado {
                         <td><?php echo esc_html($row->telefono); ?></td>
                         <td><?php echo esc_html($row->numeros_csv); ?></td>
                         <td><?php echo esc_html(number_format($row->total,0,',','.')); ?></td>
-                        <td><?php echo esc_html($row->status); ?></td>
+                        <td>
+                            <span style="padding:3px 8px;border-radius:3px;background:<?php 
+                                echo $row->status === 'pagado' ? '#d9f7d9' : ($row->status === 'reservado' ? '#fff5cc' : '#f0f0f0'); 
+                            ?>">
+                                <?php echo esc_html($row->status); ?>
+                            </span>
+                        </td>
                         <td><?php echo esc_html($row->created_at); ?></td>
-                        <td><?php echo esc_html($row->expires_at); ?></td>
+                        <td>
+                            <a class="button button-small" href="<?php echo esc_url(admin_url('admin.php?page=dm-rifa-compradores&rifa_id='.$rifa_id.'&view='.$row->id)); ?>">
+                                Gestionar números
+                            </a>
+                        </td>
                     </tr>
                 <?php endforeach; else: ?>
                     <tr><td colspan="9">Sin compradores aún.</td></tr>
@@ -421,6 +383,141 @@ class DM_Rifa_Unificado {
             </table>
         </div>
         <?php
+    }
+
+    private function render_reserva_detail($reserva_id, $rifa_id) {
+        global $wpdb;
+        $reserva = $this->fetch_reserva($reserva_id);
+        
+        if (!$reserva || intval($reserva->rifa_id) !== $rifa_id) {
+            echo '<div class="wrap"><h1>Error</h1><p>Reserva no encontrada.</p></div>';
+            return;
+        }
+
+        $rifa = $this->fetch_rifa($rifa_id);
+        $numeros_arr = array_map('trim', explode(',', $reserva->numeros_csv));
+        
+        // Obtener estado actual de cada número
+        $numeros_estado = array();
+        if (!empty($numeros_arr)) {
+            $place = implode(',', array_fill(0, count($numeros_arr), '%s'));
+            $query = $wpdb->prepare(
+                "SELECT numero, estado FROM {$this->tbl_numeros} WHERE rifa_id = %d AND numero IN ($place)",
+                array_merge(array($rifa_id), $numeros_arr)
+            );
+            $results = $wpdb->get_results($query);
+            foreach($results as $r) {
+                $numeros_estado[$r->numero] = $r->estado;
+            }
+        }
+
+        ?>
+        <div class="wrap">
+            <h1>Gestionar Reserva #<?php echo esc_html($reserva_id); ?></h1>
+            <p>
+                <a href="<?php echo esc_url(admin_url('admin.php?page=dm-rifa-compradores&rifa_id='.$rifa_id)); ?>" class="button">
+                    ← Volver a compradores
+                </a>
+            </p>
+
+            <div style="background:#fff;border:1px solid #ccc;padding:15px;margin:15px 0;">
+                <h2>Información del comprador</h2>
+                <p><strong>Nombre:</strong> <?php echo esc_html($reserva->nombre); ?></p>
+                <p><strong>Email:</strong> <?php echo esc_html($reserva->email); ?></p>
+                <p><strong>Teléfono:</strong> <?php echo esc_html($reserva->telefono); ?></p>
+                <p><strong>Total:</strong> $<?php echo esc_html(number_format($reserva->total,0,',','.')); ?></p>
+                <p><strong>Estado global:</strong> <?php echo esc_html($reserva->status); ?></p>
+                <p><strong>Creado:</strong> <?php echo esc_html($reserva->created_at); ?></p>
+            </div>
+
+            <h2>Números de esta reserva</h2>
+            <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>">
+                <?php wp_nonce_field('dm_rifa_update_reserva'); ?>
+                <input type="hidden" name="action" value="dm_rifa_update_reserva">
+                <input type="hidden" name="reserva_id" value="<?php echo esc_attr($reserva_id); ?>">
+                <input type="hidden" name="rifa_id" value="<?php echo esc_attr($rifa_id); ?>">
+                
+                <div style="margin:10px 0;">
+                    <button class="button" type="submit" name="cambiar_estado" value="reservado">Marcar seleccionados como Reservado</button>
+                    <button class="button button-primary" type="submit" name="cambiar_estado" value="pagado">Marcar seleccionados como Pagado</button>
+                    <button class="button" type="submit" name="cambiar_estado" value="disponible">Liberar seleccionados (Disponible)</button>
+                </div>
+
+                <table class="widefat striped">
+                    <thead>
+                        <tr>
+                            <th style="width:50px;"><input type="checkbox" id="dm-checkall"></th>
+                            <th>Número</th>
+                            <th>Estado actual</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                    <?php foreach($numeros_arr as $num): 
+                        $num = trim($num);
+                        if ($num === '') continue;
+                        $estado_actual = $numeros_estado[$num] ?? 'desconocido';
+                        $bg_color = $estado_actual === 'pagado' ? '#d9f7d9' : ($estado_actual === 'reservado' ? '#fff5cc' : '#f0f0f0');
+                    ?>
+                        <tr>
+                            <td><input type="checkbox" name="numeros[]" value="<?php echo esc_attr($num); ?>"></td>
+                            <td><strong><?php echo esc_html($num); ?></strong></td>
+                            <td>
+                                <span style="padding:3px 8px;border-radius:3px;background:<?php echo $bg_color; ?>">
+                                    <?php echo esc_html($estado_actual); ?>
+                                </span>
+                            </td>
+                        </tr>
+                    <?php endforeach; ?>
+                    </tbody>
+                </table>
+            </form>
+        </div>
+        <?php
+    }
+
+    public function admin_post_update_reserva() {
+        if ( ! current_user_can('manage_options') ) { wp_die('Permisos insuficientes'); }
+        check_admin_referer('dm_rifa_update_reserva');
+        
+        global $wpdb;
+        $reserva_id = intval($_POST['reserva_id'] ?? 0);
+        $rifa_id = intval($_POST['rifa_id'] ?? 0);
+        $estado = sanitize_text_field($_POST['cambiar_estado'] ?? '');
+        $numeros = array_map('sanitize_text_field', $_POST['numeros'] ?? array());
+
+        if (!$reserva_id || !$rifa_id || !in_array($estado, array('disponible','reservado','pagado')) || empty($numeros)) {
+            wp_redirect(admin_url('admin.php?page=dm-rifa-compradores&rifa_id='.$rifa_id.'&view='.$reserva_id));
+            exit;
+        }
+
+        $place = implode(',', array_fill(0, count($numeros), '%s'));
+        
+        if ($estado === 'disponible') {
+            // Liberar números: quitar reserva_id
+            $wpdb->query($wpdb->prepare(
+                "UPDATE {$this->tbl_numeros} SET estado = %s, reserva_id = NULL, updated_at = NOW() WHERE rifa_id = %d AND numero IN ($place)",
+                array_merge(array($estado, $rifa_id), $numeros)
+            ));
+        } else {
+            // Reservar o pagar: mantener/establecer reserva_id
+            $wpdb->query($wpdb->prepare(
+                "UPDATE {$this->tbl_numeros} SET estado = %s, reserva_id = %d, updated_at = NOW() WHERE rifa_id = %d AND numero IN ($place)",
+                array_merge(array($estado, $reserva_id, $rifa_id), $numeros)
+            ));
+        }
+
+        // Actualizar estado global de la reserva basado en todos sus números
+        $reserva = $this->fetch_reserva($reserva_id);
+        $nuevo_status = $this->calcular_estado_reserva($reserva, $rifa_id);
+
+        $wpdb->update(
+            $this->tbl_reservas,
+            array('status' => $nuevo_status),
+            array('id' => $reserva_id)
+        );
+
+        wp_redirect(admin_url('admin.php?page=dm-rifa-compradores&rifa_id='.$rifa_id.'&view='.$reserva_id.'&updated=1'));
+        exit;
     }
 
     public function admin_post_export_csv() {
@@ -452,7 +549,6 @@ class DM_Rifa_Unificado {
         $rifa = $this->fetch_rifa($rifa_id);
         if (!$rifa) return '<div class="dm-rifa-error">Rifa no encontrada.</div>';
 
-        // Estados actuales embed en JSON para el front
         $nums = $wpdb->get_results($wpdb->prepare("SELECT numero, estado FROM {$this->tbl_numeros} WHERE rifa_id = %d ORDER BY numero ASC", $rifa_id));
         $map = array();
         foreach($nums as $n) { $map[$n->numero] = $n->estado; }
@@ -545,7 +641,6 @@ class DM_Rifa_Unificado {
             wp_send_json_error(array('message'=>'Rifa no encontrada'), 404);
         }
 
-        // Normaliza números a formato 000
         $nums = array();
         foreach($nlist as $k=>$v){
             $v = strtoupper(trim($v));
@@ -557,7 +652,6 @@ class DM_Rifa_Unificado {
             wp_send_json_error(array('message'=>'No se enviaron números válidos'), 400);
         }
 
-        // Verifica disponibilidad
         $place = implode(',', array_fill(0,count($nums), '%s'));
         $rows = $wpdb->get_results($wpdb->prepare("SELECT numero, estado FROM {$this->tbl_numeros} WHERE rifa_id = %d AND numero IN ($place)", array_merge(array($rifa_id), $nums)));
         $no_disp = array();
@@ -570,10 +664,9 @@ class DM_Rifa_Unificado {
             wp_send_json_error(array('message'=>'No disponibles: '.implode(', ', $no_disp)), 409);
         }
 
-        // Crea reserva con token
         $precio_unit = intval($rifa->precio);
         $total   = $precio_unit * count($nums);
-        $expires = date('Y-m-d H:i:s', time() + 24*3600); // 24h
+        $expires = date('Y-m-d H:i:s', time() + 24*3600);
         $token   = function_exists('random_bytes')
             ? bin2hex(random_bytes(16))
             : wp_generate_password(32, false);
@@ -596,14 +689,12 @@ class DM_Rifa_Unificado {
             wp_send_json_error(array('message'=>'No se pudo crear la reserva'), 500);
         }
 
-        // Marca números como reservados
         $ids = $wpdb->get_col($wpdb->prepare("SELECT id FROM {$this->tbl_numeros} WHERE rifa_id = %d AND numero IN ($place)", array_merge(array($rifa_id), $nums)));
         if ($ids) {
             $place2 = implode(',', array_fill(0, count($ids), '%d'));
             $wpdb->query($wpdb->prepare("UPDATE {$this->tbl_numeros} SET estado = 'reservado', reserva_id = %d, updated_at = NOW() WHERE id IN ($place2)", array_merge(array($reserva_id), $ids)));
         }
 
-        // URL de confirmación (enmascarada con token)
         $confirm_url = '';
         if (intval($rifa->gracias_page_id) > 0) {
             $confirm_url = add_query_arg(
@@ -613,7 +704,7 @@ class DM_Rifa_Unificado {
         }
 
         wp_send_json_success(array(
-            'reserva_id'  => $reserva_id, // opcional, ya no se usa en la URL
+            'reserva_id'  => $reserva_id,
             'confirm_url' => $confirm_url,
         ));
     }
