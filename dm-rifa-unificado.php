@@ -1,10 +1,15 @@
 <?php
 /**
  * Plugin Name: DM Rifa Unificado
+ * Plugin URI: https://github.com/tu-usuario/dm-rifa-unificado
  * Description: Selector de números, reservas y página de confirmación con WhatsApp + panel de gestión en el admin (todo en un solo plugin).
  * Version: 1.0.1
  * Author: DM Studio SAS
+ * Author URI: https://dm-studio.com
  * License: GPL2
+ * License URI: https://www.gnu.org/licenses/gpl-2.0.html
+ * Text Domain: dm-rifa-unificado
+ * Domain Path: /languages
  */
 
 if ( ! defined('ABSPATH') ) { exit; }
