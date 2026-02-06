@@ -1,11 +1,188 @@
-.dm-rifa-wrap{max-width:960px;margin:0 auto;}
-.dm-rifa-controls{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:10px}
-.dm-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(64px,1fr));gap:8px;margin-bottom:12px}
-.dm-cell{padding:10px;border:1px solid #ddd;background:#f5f5f5;border-radius:6px;cursor:pointer}
-.dm-cell.is-sel{outline:2px solid #1976d2}
-.dm-cell.is-reservado{background:#fff5cc;border-color:#e6c200;cursor:not-allowed}
-.dm-cell.is-pagado{background:#d9f7d9;border-color:#88cc88;cursor:not-allowed}
-.dm-form label{display:block;margin:6px 0}
-.dm-form input{width:100%;max-width:420px}
-.dm-form .dm-msg{margin-top:8px;color:#c00}
-.dm-rifa-confirm{max-width:720px;margin:0 auto;padding:12px;border:1px solid #eee;background:#fafafa}
+/* DM Rifa Unificado - Modern Design System */
+:root {
+    --rifa-primary: #1e88e5;
+    --rifa-primary-hover: #1565c0;
+    --rifa-bg: #ffffff;
+    --rifa-bg-alt: #f8fafc;
+    --rifa-border: #e2e8f0;
+    --rifa-text: #1e293b;
+    --rifa-text-muted: #64748b;
+    
+    --rifa-status-available: #f1f5f9;
+    --rifa-status-available-border: #cbd5e1;
+    
+    --rifa-status-reserved: #fefce8;
+    --rifa-status-reserved-border: #fef08a;
+    --rifa-status-reserved-text: #854d0e;
+    
+    --rifa-status-paid: #f0fdf4;
+    --rifa-status-paid-border: #bbf7d0;
+    --rifa-status-paid-text: #166534;
+    
+    --rifa-selected: #dbeafe;
+    --rifa-selected-border: #3b82f6;
+    --rifa-selected-text: #1e40af;
+}
+
+.dm-rifa-wrap {
+    max-width: 1000px;
+    margin: 2rem auto;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    color: var(--rifa-text);
+    background: var(--rifa-bg);
+    border-radius: 12px;
+    box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1), 0 2px 4px -2px rgb(0 0 0 / 0.1);
+    padding: 1.5rem;
+}
+
+.dm-rifa-controls {
+    display: flex;
+    gap: 1rem;
+    align-items: center;
+    flex-wrap: wrap;
+    margin-bottom: 2rem;
+    padding-bottom: 1rem;
+    border-bottom: 1px solid var(--rifa-border);
+}
+
+.dm-rifa-controls input, 
+.dm-rifa-controls select {
+    padding: 0.6rem 1rem;
+    border: 1px solid var(--rifa-border);
+    border-radius: 8px;
+    font-size: 0.95rem;
+    background: var(--rifa-bg);
+}
+
+.dm-rifa-controls input:focus {
+    outline: none;
+    border-color: var(--rifa-primary);
+    box-shadow: 0 0 0 3px rgba(30, 136, 229, 0.1);
+}
+
+.dm-contador {
+    font-size: 1.1rem;
+    color: var(--rifa-primary);
+    background: var(--rifa-selected);
+    padding: 0.5rem 1rem;
+    border-radius: 20px;
+    margin-left: auto;
+}
+
+.dm-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(70px, 1fr));
+    gap: 10px;
+    margin-bottom: 2.5rem;
+}
+
+.dm-cell {
+    aspect-ratio: 1/1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-weight: 600;
+    font-size: 1rem;
+    border: 1px solid var(--rifa-status-available-border);
+    background: var(--rifa-status-available);
+    border-radius: 10px;
+    cursor: pointer;
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.dm-cell:hover:not([aria-disabled="true"]) {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.05);
+    border-color: var(--rifa-primary);
+}
+
+.dm-cell.is-sel {
+    background: var(--rifa-primary);
+    color: white;
+    border-color: var(--rifa-primary);
+    transform: scale(1.05);
+}
+
+.dm-cell.is-reservado {
+    background: var(--rifa-status-reserved);
+    border-color: var(--rifa-status-reserved-border);
+    color: var(--rifa-status-reserved-text);
+    cursor: not-allowed;
+    opacity: 0.8;
+}
+
+.dm-cell.is-pagado {
+    background: var(--rifa-status-paid);
+    border-color: var(--rifa-status-paid-border);
+    color: var(--rifa-status-paid-text);
+    cursor: not-allowed;
+}
+
+.dm-form {
+    background: var(--rifa-bg-alt);
+    padding: 2rem;
+    border-radius: 12px;
+    border: 1px solid var(--rifa-border);
+}
+
+.dm-form h3 { margin-top: 0; margin-bottom: 1.5rem; }
+
+.dm-form label {
+    display: block;
+    margin-bottom: 1.2rem;
+    font-weight: 500;
+}
+
+.dm-form input {
+    margin-top: 0.4rem;
+    width: 100%;
+    padding: 0.8rem 1rem;
+    border: 1px solid var(--rifa-border);
+    border-radius: 8px;
+    font-size: 1rem;
+}
+
+.dm-form button.dm-continuar {
+    width: 100%;
+    padding: 1rem;
+    background: var(--rifa-primary);
+    color: white;
+    border: none;
+    border-radius: 8px;
+    font-size: 1.1rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.2s;
+}
+
+.dm-form button.dm-continuar:hover {
+    background: var(--rifa-primary-hover);
+}
+
+.dm-msg {
+    margin-top: 1rem;
+    padding: 0.8rem;
+    border-radius: 8px;
+    font-weight: 500;
+    text-align: center;
+}
+
+.dm-msg:not(:empty) { background: #fee2e2; color: #991b1b; }
+
+.dm-rifa-confirm {
+    max-width: 600px;
+    margin: 3rem auto;
+    padding: 2.5rem;
+    background: white;
+    border-radius: 16px;
+    box-shadow: 0 20px 25px -5px rgb(0 0 0 / 0.1);
+    text-align: center;
+}
+
+.dm-rifa-confirm h2 { color: var(--rifa-status-paid-text); margin-top: 0; }
+
+@media (max-width: 640px) {
+    .dm-rifa-wrap { padding: 1rem; }
+    .dm-grid { grid-template-columns: repeat(auto-fill, minmax(60px, 1fr)); }
+    .dm-contador { margin-left: 0; width: 100%; text-align: center; }
+}
