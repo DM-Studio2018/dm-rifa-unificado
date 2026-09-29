@@ -19,9 +19,6 @@
     --rifa-status-paid-border: #16a34a;
     --rifa-status-paid-text: #ffffff;
 
-    --rifa-status-assigned: #ec4899;
-    --rifa-status-assigned-border: #be185d;
-    --rifa-status-assigned-text: #ffffff;
 
     --rifa-selected: #dbeafe;
     --rifa-selected-border: #3b82f6;
@@ -171,12 +168,6 @@
     cursor: not-allowed;
 }
 
-.dm-cell.is-asignado {
-    background: var(--rifa-status-assigned) !important;
-    border-color: var(--rifa-status-assigned-border) !important;
-    color: var(--rifa-status-assigned-text) !important;
-    cursor: not-allowed;
-}
 
 .dm-form {
     background: var(--rifa-bg-alt);

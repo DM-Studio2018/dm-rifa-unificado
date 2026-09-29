@@ -224,6 +224,38 @@ class DM_Rifa_Unificado
                 $wpdb->query("ALTER TABLE {$this->tbl_numeros} ADD COLUMN vendedor_id BIGINT UNSIGNED NULL AFTER reserva_id");
             }
         }
+        $this->migrar_sin_venta_fisica();
+    }
+
+    /**
+     * 2.0.0 — Se eliminó la venta física (números "asignados" a vendedores).
+     * Migración única: los números en estado 'asignado' sin reserva vuelven a 'disponible';
+     * los que tengan reserva pasan a 'pagado' (antes calcular_estado_reserva() ya los contaba como pagados).
+     * Guarda el resultado en la opción dm_rifa_migracion_200.
+     */
+    private function migrar_sin_venta_fisica()
+    {
+        if (get_option('dm_rifa_migracion_200')) {
+            return;
+        }
+        global $wpdb;
+        $liberados = $wpdb->query(
+            "UPDATE {$this->tbl_numeros} SET estado = 'disponible', vendedor_id = NULL, updated_at = NOW()
+             WHERE estado = 'asignado' AND (reserva_id IS NULL OR reserva_id = 0)"
+        );
+        $pagados = $wpdb->query(
+            "UPDATE {$this->tbl_numeros} SET estado = 'pagado', updated_at = NOW()
+             WHERE estado = 'asignado' AND reserva_id > 0"
+        );
+        if ($liberados === false || $pagados === false) {
+            error_log('DM Rifa: error en la migración 2.0.0: ' . $wpdb->last_error);
+            return; // se reintenta en la próxima carga del admin
+        }
+        update_option('dm_rifa_migracion_200', array(
+            'fecha' => current_time('mysql'),
+            'liberados' => intval($liberados),
+            'pagados' => intval($pagados),
+        ), false);
     }
 
     public function ensure_arqueos_table()
@@ -381,10 +413,9 @@ class DM_Rifa_Unificado
             $estados[] = $r->estado;
         }
 
-        // Si TODOS están pagados o asignados → pagado
-        $completados = array('pagado', 'asignado');
+        // Si TODOS están pagados → pagado
         foreach ($estados as $est) {
-            if (!in_array($est, $completados)) {
+            if ($est !== 'pagado') {
                 return 'reservado'; // Basta un número no pagado para quedar como reservado
             }
         }
@@ -426,7 +457,7 @@ class DM_Rifa_Unificado
         global $wpdb;
 
         // Rifas activas para selección
-        $active_rifas = $wpdb->get_results("SELECT id, nombre, modo_venta FROM {$this->tbl_rifas} WHERE activo = 1 ORDER BY id DESC");
+        $active_rifas = $wpdb->get_results("SELECT id, nombre FROM {$this->tbl_rifas} WHERE activo = 1 ORDER BY id DESC");
         $active_count = count($active_rifas);
         $selected_rifa_id = $this->get_context_rifa_id();
 
@@ -451,10 +482,6 @@ class DM_Rifa_Unificado
                                 onmouseover="this.style.transform='translateY(-3px)'; this.style.box_shadow='0 4px 8px rgba(0,0,0,0.1)';"
                                 onmouseout="this.style.transform='translateY(0)'; this.style.box_shadow='0 2px 4px rgba(0,0,0,0.05)';">
                                 <h3 style="margin: 0; color: #2271b1;"><?php echo esc_html($r->nombre); ?></h3>
-                                <p style="margin: 10px 0 0; color: #666;">
-                                    Modo:
-                                    <strong><?php echo $r->modo_venta === 'virtual' ? 'Sólo Virtual' : 'Mixto (Físico/Virtual)'; ?></strong>
-                                </p>
                                 <span class="button button-primary" style="margin-top: 15px;">Ver Dashboard</span>
                             </div>
                         </a>
@@ -477,8 +504,6 @@ class DM_Rifa_Unificado
             return;
         }
 
-        $is_virtual = ($rifa->modo_venta === 'virtual');
-
         // Estadísticas de la rifa seleccionada
         $total_vendedores = $wpdb->get_var("SELECT COUNT(*) FROM {$this->tbl_vendedores}");
 
@@ -499,8 +524,7 @@ class DM_Rifa_Unificado
         $ticket_stats = $wpdb->get_row($wpdb->prepare("
             SELECT 
                 SUM(CASE WHEN n.estado = 'pagado' THEN 1 ELSE 0 END) as total_boletas_pagadas,
-                SUM(CASE WHEN n.estado = 'reservado' THEN 1 ELSE 0 END) as total_boletas_reservadas,
-                SUM(CASE WHEN n.estado = 'pagado' AND r.forma_pago = 'efectivo' THEN 1 ELSE 0 END) as total_boletas_fisicas
+                SUM(CASE WHEN n.estado = 'reservado' THEN 1 ELSE 0 END) as total_boletas_reservadas
             FROM {$this->tbl_numeros} n
             LEFT JOIN {$this->tbl_reservas} r ON n.reserva_id = r.id
             WHERE n.rifa_id = %d
@@ -602,17 +626,6 @@ class DM_Rifa_Unificado
                         <h1 style="margin: 0;">Dashboard</h1>
                         <p style="margin: 5px 0 0;">Monitoreo en tiempo real de rifas</p>
                     </div>
-                    <?php if ($is_virtual): ?>
-                        <div
-                            style="background: #e7f5ec; color: #18502f; padding: 5px 12px; border-radius: 12px; font-weight: bold; font-size: 13px;">
-                            🌐 Sólo Virtual
-                        </div>
-                    <?php else: ?>
-                        <div
-                            style="background: #e8f4fd; color: #1d4ed8; padding: 5px 12px; border-radius: 12px; font-weight: bold; font-size: 13px;">
-                            🔄 Modelo Mixto
-                        </div>
-                    <?php endif; ?>
                 </div>
 
                 <!-- Selector de Rifa -->
@@ -625,8 +638,7 @@ class DM_Rifa_Unificado
                             onchange="window.location.href='admin.php?page=dm-rifa-dashboard&rifa_id=' + this.value;">
                             <?php foreach ($active_rifas as $r): ?>
                                 <option value="<?php echo $r->id; ?>" <?php echo $r->id == $selected_rifa_id ? 'selected' : ''; ?>>
-                                    <?php echo esc_html($r->nombre); ?> -
-                                    <?php echo $r->modo_venta === 'virtual' ? 'Virtual' : 'Mixto'; ?>
+                                    <?php echo esc_html($r->nombre); ?>
                                 </option>
                             <?php endforeach; ?>
                         </select>
@@ -1020,7 +1032,6 @@ class DM_Rifa_Unificado
                 'boleta_id' => $boleta_id,
                 'url_rifa' => esc_url_raw($_POST['url_rifa'] ?? ''),
                 'meta_recaudo' => intval($_POST['meta_recaudo'] ?? 0),
-                'modo_venta' => sanitize_text_field($_POST['modo_venta'] ?? 'mixto'),
             );
 
             if ($rifa_id > 0) {
@@ -1143,17 +1154,6 @@ class DM_Rifa_Unificado
                                 'option_none_value' => 0
                             ));
                             ?>
-                        </td>
-                    </tr>
-                    <tr>
-                        <th>Modelo de Venta</th>
-                        <td>
-                            <select name="modo_venta">
-                                <option value="mixto" <?php selected($edit_rifa ? $edit_rifa->modo_venta : 'mixto', 'mixto'); ?>>Mixto (Físico y Virtual)</option>
-                                <option value="virtual" <?php selected($edit_rifa ? $edit_rifa->modo_venta : 'mixto', 'virtual'); ?>>Sólo Virtual</option>
-                            </select>
-                            <p class="description">Si eliges "Sólo Virtual", se ocultarán las opciones de venta física y
-                                reportes relacionados.</p>
                         </td>
                     </tr>
                     <tr>
@@ -1301,10 +1301,6 @@ class DM_Rifa_Unificado
     /* ---------------------- Admin: Vendedores ---------------------- */
     public function page_vendedores()
     {
-        ini_set('display_errors', 1);
-        ini_set('display_startup_errors', 1);
-        error_reporting(E_ALL);
-        error_log("DM RIFA DEBUG: Executing page_vendedores");
         global $wpdb;
 
         $table_name = $this->tbl_vendedores;
@@ -1314,21 +1310,18 @@ class DM_Rifa_Unificado
         $orderby = $_GET['orderby'] ?? 'id';
         $order = strtoupper($_GET['order'] ?? 'ASC');
 
-        error_log("DM RIFA DEBUG: Action: $action, Seller ID: $seller_id");
         $next_order = ($order === 'ASC') ? 'DESC' : 'ASC';
 
         // Asegurar que las tablas existen (especialmente si no se reactivó el plugin)
         $table_exists = $wpdb->get_var("SHOW TABLES LIKE '{$this->tbl_vendedores}'");
         if (!$table_exists) {
-            error_log("DM RIFA DEBUG: La tabla de vendedores NO existe. Ejecutando db_init...");
+            error_log("DM Rifa: la tabla de vendedores no existe, se crea.");
             $this->on_activate();
             $table_exists = $wpdb->get_var("SHOW TABLES LIKE '{$this->tbl_vendedores}'");
         }
 
         // Procesar creación
         if (isset($_POST['dm_crear_vendedor'])) {
-            error_log("DM RIFA DEBUG: Registrando vendedor...");
-            error_log("POST DATA: " . print_r($_POST, true));
             check_admin_referer('dm_vendedor_nonce');
             $res = $wpdb->insert($this->tbl_vendedores, array(
                 'nombre' => sanitize_text_field($_POST['nombre']),
@@ -1336,10 +1329,9 @@ class DM_Rifa_Unificado
                 'telefono' => sanitize_text_field($_POST['telefono'])
             ));
             if ($res === false) {
-                error_log("DM RIFA DEBUG: ERROR al insertar vendedor: " . $wpdb->last_error);
+                error_log("DM Rifa: error al insertar vendedor: " . $wpdb->last_error);
                 echo '<div class="error"><p>Error al crear el vendedor: ' . esc_html($wpdb->last_error) . '</p></div>';
             } else {
-                error_log("DM RIFA DEBUG: Vendedor insertado con ID: " . $wpdb->insert_id);
                 echo '<div class="updated"><p>Vendedor creado.</p></div>';
             }
         }
@@ -1516,289 +1508,6 @@ class DM_Rifa_Unificado
         }
 
 
-        // Procesar auto-asignación aleatoria
-        if (isset($_POST['dm_auto_assign_10'])) {
-            check_admin_referer('dm_auto_assign_nonce');
-            $rifa_id = intval($_POST['rifa_id']);
-            if (!$rifa_id) {
-                echo '<div class="error"><p>Selecciona una rifa válida.</p></div>';
-            } else {
-                $vendedores = $wpdb->get_results("SELECT id FROM {$this->tbl_vendedores}");
-                $total_assigned = 0;
-                foreach ($vendedores as $v) {
-                    // Ver si ya tiene números asignados (para completar hasta 10)
-                    $current_count = $wpdb->get_var($wpdb->prepare(
-                        "SELECT COUNT(*) FROM {$this->tbl_numeros} WHERE vendedor_id = %d AND rifa_id = %d AND estado = 'asignado'",
-                        $v->id,
-                        $rifa_id
-                    ));
-
-                    if ($current_count < 10) {
-                        $needed = 10 - $current_count;
-                        $available = $wpdb->get_col($wpdb->prepare(
-                            "SELECT numero FROM {$this->tbl_numeros} WHERE rifa_id = %d AND estado = 'disponible' ORDER BY RAND() LIMIT %d",
-                            $rifa_id,
-                            $needed
-                        ));
-
-                        foreach ($available as $num) {
-                            $res = $wpdb->update(
-                                $this->tbl_numeros,
-                                array('estado' => 'asignado', 'vendedor_id' => $v->id),
-                                array('rifa_id' => $rifa_id, 'numero' => $num, 'estado' => 'disponible')
-                            );
-                            if ($res)
-                                $total_assigned++;
-                        }
-                    }
-                }
-                echo '<div class="updated"><p>Se han asignado ' . intval($total_assigned) . ' números aleatoriamente entre los vendedores.</p></div>';
-            }
-        }
-
-        // Procesar asignación física de números
-        if (isset($_POST['dm_asignar_numeros'])) {
-            check_admin_referer('dm_assign_nonce');
-            $seller_id = intval($_POST['vendedor_id'] ?? 0);
-            $rifa_id = intval($_POST['rifa_id'] ?? 0);
-
-            // Fuente 1: campo oculto "numeros" (CSV armado por updateHiddenNumeros()).
-            $numeros_post = sanitize_text_field(wp_unslash($_POST['numeros'] ?? ''));
-            $desde_hidden = array_map('trim', explode(',', $numeros_post));
-
-            // Fuente 2 (respaldo): checkboxes numeros_check[] enviados por el navegador.
-            $desde_checks = isset($_POST['numeros_check']) && is_array($_POST['numeros_check'])
-                ? array_map('sanitize_text_field', wp_unslash($_POST['numeros_check']))
-                : array();
-
-            // Unión de ambas fuentes; solo se aceptan números (ej. "007").
-            $numeros_seleccionados = array();
-            foreach (array_merge($desde_hidden, $desde_checks) as $num) {
-                $num = trim((string) $num);
-                if ($num !== '' && ctype_digit($num)) {
-                    $numeros_seleccionados[$num] = $num;
-                }
-            }
-            $numeros_seleccionados = array_values($numeros_seleccionados);
-
-            if ($seller_id <= 0 || $rifa_id <= 0) {
-                echo '<div class="notice notice-error"><p>Vendedor o rifa no válidos. No se realizó ningún cambio.</p></div>';
-            } elseif (empty($numeros_seleccionados)) {
-                // Protección: si no llega ninguna selección no se libera nada (antes se liberaban todos los números del vendedor).
-                echo '<div class="notice notice-warning"><p><strong>No se recibió ningún número seleccionado.</strong> Por seguridad no se liberó ni se asignó ningún número. Si quieres quitarle números al vendedor, deja marcados los que conserva y vuelve a guardar.</p></div>';
-            } else {
-                // 1. Liberar solo los números asignados a este vendedor que ya NO están seleccionados.
-                $placeholders = implode(',', array_fill(0, count($numeros_seleccionados), '%s'));
-                $liberados = $wpdb->query($wpdb->prepare(
-                    "UPDATE {$this->tbl_numeros} SET estado = 'disponible', vendedor_id = NULL, updated_at = NOW()
-                     WHERE vendedor_id = %d AND rifa_id = %d AND estado = 'asignado' AND numero NOT IN ($placeholders)",
-                    array_merge(array($seller_id, $rifa_id), $numeros_seleccionados)
-                ));
-
-                // 2. Asignar los seleccionados que estén disponibles (los que ya eran suyos se conservan).
-                $nuevos = 0;
-                $no_disponibles = array();
-                foreach ($numeros_seleccionados as $num) {
-                    $actual = $wpdb->get_row($wpdb->prepare(
-                        "SELECT estado, vendedor_id FROM {$this->tbl_numeros} WHERE rifa_id = %d AND numero = %s",
-                        $rifa_id,
-                        $num
-                    ));
-                    if (!$actual) {
-                        $no_disponibles[] = $num;
-                        continue;
-                    }
-                    if ($actual->estado === 'asignado' && intval($actual->vendedor_id) === $seller_id) {
-                        continue; // ya era suyo
-                    }
-                    $res = $wpdb->update(
-                        $this->tbl_numeros,
-                        array('estado' => 'asignado', 'vendedor_id' => $seller_id, 'updated_at' => current_time('mysql')),
-                        array('rifa_id' => $rifa_id, 'numero' => $num, 'estado' => 'disponible')
-                    );
-                    if ($res) {
-                        $nuevos++;
-                    } else {
-                        $no_disponibles[] = $num;
-                    }
-                }
-
-                $total_vendedor = intval($wpdb->get_var($wpdb->prepare(
-                    "SELECT COUNT(*) FROM {$this->tbl_numeros} WHERE vendedor_id = %d AND rifa_id = %d AND estado = 'asignado'",
-                    $seller_id,
-                    $rifa_id
-                )));
-
-                echo '<div class="notice notice-success"><p>Asignación actualizada: ' . intval($nuevos) . ' número(s) nuevos, '
-                    . intval($liberados) . ' liberado(s). El vendedor tiene ahora ' . intval($total_vendedor) . ' número(s) asignados en esta rifa.</p></div>';
-                if (!empty($no_disponibles)) {
-                    echo '<div class="notice notice-warning"><p>No se pudieron asignar porque ya no estaban disponibles: '
-                        . esc_html(implode(', ', $no_disponibles)) . '</p></div>';
-                }
-            }
-        }
-
-        // Procesar reporte de venta física
-        if (isset($_POST['dm_reportar_venta_fisica'])) {
-            check_admin_referer('dm_report_sale_nonce');
-            $seller_id = intval($_POST['vendedor_id']);
-            $rifa_id = intval($_POST['rifa_id']);
-            $numeros_seleccionados = $_POST['numeros_venda'] ?? array();
-            $nombre_comprador = sanitize_text_field($_POST['nombre_comprador'] ?: 'Venta Física');
-            $telefono_comprador = sanitize_text_field($_POST['telefono_comprador'] ?: '');
-
-            if (empty($numeros_seleccionados)) {
-                echo '<div class="error"><p>No seleccionaste ningún número.</p></div>';
-            } else {
-                $rifa = $this->fetch_rifa($rifa_id);
-                // 1. Crear Reserva como Pagada
-                $wpdb->insert($this->tbl_reservas, array(
-                    'rifa_id' => $rifa_id,
-                    'nombre' => $nombre_comprador,
-                    'email' => '',
-                    'telefono' => $telefono_comprador,
-                    'numeros_csv' => implode(', ', $numeros_seleccionados),
-                    'vendedor_id' => $seller_id,
-                    'status' => 'pagado',
-                    'precio_unit' => $rifa->precio,
-                    'total' => $rifa->precio * count($numeros_seleccionados),
-                    'token' => wp_generate_password(12, false),
-                    'created_at' => current_time('mysql'),
-                    'forma_pago' => 'efectivo'
-                ));
-                $reserva_id = $wpdb->insert_id;
-
-                // 2. Actualizar Números
-                $count = 0;
-                foreach ($numeros_seleccionados as $num) {
-                    $res = $wpdb->update(
-                        $this->tbl_numeros,
-                        array('estado' => 'pagado', 'reserva_id' => $reserva_id, 'vendedor_id' => $seller_id),
-                        array('rifa_id' => $rifa_id, 'numero' => $num, 'vendedor_id' => $seller_id, 'estado' => 'asignado')
-                    );
-                    if ($res)
-                        $count++;
-                }
-                echo '<div class="updated"><p>' . intval($count) . ' números marcados como PAGO (Venta Física).</p></div>';
-                echo '<script>window.location.href="?page=dm-rifa-vendedores&action=report&id=' . $seller_id . '&updated=1";</script>';
-                return;
-            }
-        }
-
-        // Nueva Vista: Asignar Números (Física)
-        if ($action === 'assign' && $seller_id > 0) {
-            error_log("DM RIFA DEBUG: Entering assign view");
-            $seller_id = intval($_GET['id']);
-            $vendedor = $wpdb->get_row($wpdb->prepare("SELECT * FROM {$this->tbl_vendedores} WHERE id = %d", $seller_id));
-            if (!$vendedor) {
-                echo '<div class="wrap"><h1>Vendedor no encontrado</h1><p><a href="?page=dm-rifa-vendedores">Volver</a></p></div>';
-                return;
-            }
-
-            $rifas = $wpdb->get_results("SELECT id, nombre FROM {$this->tbl_rifas} ORDER BY id DESC");
-            $rifa_id = intval($_GET['rifa_id'] ?? ($rifas[0]->id ?? 0));
-
-            // Obtener todos los números de esta rifa
-            $todos_nums = $wpdb->get_results($wpdb->prepare(
-                "SELECT numero, estado, vendedor_id FROM {$this->tbl_numeros} WHERE rifa_id = %d ORDER BY CAST(numero AS UNSIGNED) ASC",
-                $rifa_id
-            ));
-            ?>
-            <div class="wrap">
-                <h1>Asignar Números a: <?php echo esc_html($vendedor->nombre); ?></h1>
-                <p><a href="?page=dm-rifa-vendedores" class="button">Volver al listado</a></p>
-
-                <div class="card" style="max-width: 100%; margin-top: 20px;">
-                    <form method="get" action="">
-                        <input type="hidden" name="page" value="dm-rifa-vendedores">
-                        <input type="hidden" name="action" value="assign">
-                        <input type="hidden" name="id" value="<?php echo $seller_id; ?>">
-                        <p>
-                            <label><strong>Rifa:</strong></label>
-                            <select name="rifa_id" onchange="this.form.submit()">
-                                <?php foreach ($rifas as $r): ?>
-                                    <option value="<?php echo $r->id; ?>" <?php selected($rifa_id, $r->id); ?>>
-                                        <?php echo esc_html($r->nombre); ?>
-                                    </option>
-                                <?php endforeach; ?>
-                            </select>
-                        </p>
-                    </form>
-
-                    <form method="post" action="" id="dm-assign-form">
-                        <?php wp_nonce_field('dm_assign_nonce'); ?>
-                        <input type="hidden" name="vendedor_id" value="<?php echo $seller_id; ?>">
-                        <input type="hidden" name="rifa_id" value="<?php echo $rifa_id; ?>">
-
-                        <h3>Selecciona los números para entrega física:</h3>
-                        <p class="description">Los números seleccionados se marcarán como "Asignado" y quedarán bloqueados en la
-                            web. Solo puedes asignar números que estén "Disponibles".</p>
-
-                        <div
-                            style="display: grid; grid-template-columns: repeat(auto-fill, minmax(70px, 1fr)); gap: 8px; max-height: 500px; overflow-y: auto; border: 1px solid #ccc; padding: 15px; background: #f9f9f9; border-radius: 5px;">
-                            <?php foreach ($todos_nums as $n):
-                                $is_mine = ($n->vendedor_id == $seller_id && $n->estado === 'asignado');
-                                $is_blocked = ($n->estado !== 'disponible' && !$is_mine);
-                                $status_label = '';
-                                $bg = '#fff';
-                                if ($is_mine) {
-                                    $bg = '#d9f7d9'; // Verde claro para lo ya asignado a él
-                                } elseif ($is_blocked) {
-                                    $bg = '#eee';
-                                    $status_label = ($n->estado === 'reservado') ? ' (Res)' : (($n->estado === 'pagado') ? ' (Pag)' : ' (Otr)');
-                                }
-                                ?>
-                                <label
-                                    style="display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 10px; border: 1px solid #ddd; border-radius: 4px; cursor: <?php echo $is_blocked ? 'not-allowed' : 'pointer'; ?>; background: <?php echo $bg; ?>; transition: all 0.2s;">
-                                    <input type="checkbox" name="numeros_check[]" value="<?php echo esc_attr($n->numero); ?>" <?php checked($is_mine); ?> <?php disabled($is_blocked); ?> class="assign-checkbox"
-                                        style="margin-bottom: 5px;">
-                                    <span style="font-weight: bold; font-size: 14px;"><?php echo esc_html($n->numero); ?></span>
-                                    <?php if ($status_label): ?>
-                                        <small style="font-size: 10px; color: #666;"><?php echo $status_label; ?></small>
-                                    <?php endif; ?>
-                                </label>
-                            <?php endforeach; ?>
-                        </div>
-
-                        <input type="hidden" name="numeros" id="numeros_hidden">
-
-                        <p style="margin-top: 20px;">
-                            <button type="submit" name="dm_asignar_numeros" class="button button-primary button-large"
-                                onclick="updateHiddenNumeros()">Actualizar Asignación Física</button>
-                        </p>
-                    </form>
-                </div>
-            </div>
-            <script>
-                function updateHiddenNumeros() {
-                    const checkboxes = document.querySelectorAll('.assign-checkbox:checked');
-                    const values = Array.from(checkboxes).map(cb => cb.value);
-                    document.getElementById('numeros_hidden').value = values.join(',');
-                }
-                // Rellenar el campo oculto en cualquier envío (clic o Enter)
-                (function () {
-                    const form = document.getElementById('dm-assign-form');
-                    if (form) {
-                        form.addEventListener('submit', updateHiddenNumeros);
-                    }
-                })();
-                // Visual feedback enhancement
-                document.querySelectorAll('.assign-checkbox').forEach(cb => {
-                    cb.addEventListener('change', function () {
-                        if (this.checked) {
-                            this.parentElement.style.background = '#d9f7d9';
-                            this.parentElement.style.borderColor = '#22c55e';
-                        } else {
-                            this.parentElement.style.background = '#fff';
-                            this.parentElement.style.borderColor = '#ddd';
-                        }
-                    });
-                });
-            </script>
-            <?php
-            return; // Terminar aquí para no mostrar el listado general
-        }
-
         // Nueva Vista: Editar Vendedor
         if ($action === 'edit' && $seller_id > 0) {
             $seller_id = intval($_GET['id']);
@@ -1845,95 +1554,8 @@ class DM_Rifa_Unificado
             return;
         }
 
-        // Nueva Vista: Reportar Venta Física
-        if ($action === 'report_sale' && $seller_id > 0) {
-            error_log("DM RIFA DEBUG: Entering report_sale view");
-            $seller_id = intval($_GET['id']);
-            $vendedor = $wpdb->get_row($wpdb->prepare("SELECT * FROM {$this->tbl_vendedores} WHERE id = %d", $seller_id));
-            if (!$vendedor) {
-                echo "Vendedor no encontrado.";
-                return;
-            }
-
-            $rifas = $wpdb->get_results("SELECT id, nombre FROM {$this->tbl_rifas} ORDER BY id DESC");
-            $rifa_id = intval($_GET['rifa_id'] ?? ($rifas[0]->id ?? 0));
-
-            // Números ASIGNADOS a este vendedor
-            $nums_asignados = $wpdb->get_results($wpdb->prepare(
-                "SELECT numero FROM {$this->tbl_numeros} WHERE vendedor_id = %d AND rifa_id = %d AND estado = 'asignado' ORDER BY CAST(numero AS UNSIGNED) ASC",
-                $seller_id,
-                $rifa_id
-            ));
-            ?>
-            <div class="wrap">
-                <h1>Reportar Venta Física: <?php echo esc_html($vendedor->nombre); ?></h1>
-                <p><a href="?page=dm-rifa-vendedores" class="button">Volver al listado</a></p>
-
-                <div class="card" style="max-width: 600px; margin-top: 20px;">
-                    <form method="get" action="">
-                        <input type="hidden" name="page" value="dm-rifa-vendedores">
-                        <input type="hidden" name="action" value="report_sale">
-                        <input type="hidden" name="id" value="<?php echo $seller_id; ?>">
-                        <p>
-                            <label><strong>Rifa:</strong></label>
-                            <select name="rifa_id" onchange="this.form.submit()">
-                                <?php foreach ($rifas as $r): ?>
-                                    <option value="<?php echo $r->id; ?>" <?php selected($rifa_id, $r->id); ?>>
-                                        <?php echo esc_html($r->nombre); ?>
-                                    </option>
-                                <?php endforeach; ?>
-                            </select>
-                        </p>
-                    </form>
-
-                    <form method="post">
-                        <?php wp_nonce_field('dm_report_sale_nonce'); ?>
-                        <input type="hidden" name="vendedor_id" value="<?php echo $seller_id; ?>">
-                        <input type="hidden" name="rifa_id" value="<?php echo $rifa_id; ?>">
-
-                        <h3>Datos del Comprador (Opcional):</h3>
-                        <p>
-                            <input type="text" name="nombre_comprador" placeholder="Nombre del cliente" class="regular-text"
-                                style="margin-bottom: 10px; display: block;">
-                            <input type="text" name="telefono_comprador" placeholder="Teléfono" class="regular-text"
-                                style="display: block;">
-                        </p>
-
-                        <h3>Selecciona los números vendidos:</h3>
-                        <p class="description">Selecciona los números que el vendedor ya entregó y cobró físicamente. Estos pasarán
-                            de "Asignado" a "Pagado".</p>
-
-                        <?php if (empty($nums_asignados)): ?>
-                            <div style="padding: 20px; background: #fff8e1; border-left: 4px solid #ffb300; margin: 20px 0;">
-                                <p>Este vendedor no tiene números asignados para venta física en esta rifa.</p>
-                            </div>
-                        <?php else: ?>
-                            <div
-                                style="display: grid; grid-template-columns: repeat(auto-fill, minmax(80px, 1fr)); gap: 10px; margin: 20px 0; border: 1px solid #ddd; padding: 15px; background: #fff; border-radius: 4px;">
-                                <?php foreach ($nums_asignados as $na): ?>
-                                    <label
-                                        style="border: 1px solid #ccc; padding: 10px; border-radius: 4px; display: flex; align-items: center; gap: 8px; cursor: pointer; background: #fcfcfc;">
-                                        <input type="checkbox" name="numeros_venda[]" value="<?php echo esc_attr($na->numero); ?>">
-                                        <strong style="font-size: 16px;"><?php echo esc_html($na->numero); ?></strong>
-                                    </label>
-                                <?php endforeach; ?>
-                            </div>
-                            <p style="margin-top: 30px;">
-                                <button type="submit" name="dm_reportar_venta_fisica" class="button button-primary button-large"
-                                    onclick="return confirm('¿Confirmas que estos números ya fueron vendidos físicamente?')">Registrar
-                                    Venta Física</button>
-                            </p>
-                        <?php endif; ?>
-                    </form>
-                </div>
-            </div>
-            <?php
-            return;
-        }
-
         // --- VISTA REPORTE INDIVIDUAL ---
         if ($action === 'report' && $seller_id > 0) {
-            error_log("DM RIFA DEBUG: Entering report view");
             $vendedor = $wpdb->get_row($wpdb->prepare("SELECT * FROM {$this->tbl_vendedores} WHERE id = %d", $seller_id));
             if (!$vendedor) {
                 echo "Vendedor no encontrado";
@@ -1980,12 +1602,6 @@ class DM_Rifa_Unificado
                 " LIMIT 1"
             ));
             $stats->monto_reservado = $precio_unit_vendedor * intval($stats->reservadas);
-
-            $stats->asignadas_fisica = $wpdb->get_var($wpdb->prepare(
-                "SELECT COUNT(*) FROM {$this->tbl_numeros} 
-                 $where_simple AND estado = 'asignado'",
-                ...$sub_params
-            )) ?: 0;
 
             $stats->total_recaudado = $wpdb->get_var($wpdb->prepare(
                 "SELECT SUM(total) FROM {$this->tbl_reservas} 
@@ -2081,15 +1697,6 @@ class DM_Rifa_Unificado
                         <p style="font-size:11px; color: #666; margin: 5px 0 0;">De <?php echo intval($stats->pagadas); ?> boletas
                         </p>
                     </div>
-                    <?php if ($stats->asignadas_fisica > 0): ?>
-                        <div class="card" style="margin:0; padding:15px; border-left: 4px solid #ad1457;">
-                            <h3 style="margin:0; font-size: 13px; color: #666;">🎟️ Asignadas (Física)</h3>
-                            <p style="font-size:28px; font-weight:bold; margin:10px 0 0;">
-                                <?php echo intval($stats->asignadas_fisica); ?>
-                            </p>
-                            <p style="font-size:11px; color: #666; margin: 5px 0 0;">Sin vender</p>
-                        </div>
-                    <?php endif; ?>
                 </div>
 
                 <!-- Desglose financiero detallado -->
@@ -2390,8 +1997,6 @@ class DM_Rifa_Unificado
             return;
         }
 
-        error_log("DM RIFA DEBUG: Table name: " . $this->tbl_vendedores);
-
         // 1. Obtener vendedores básicos
         $query = "SELECT * FROM {$this->tbl_vendedores} ORDER BY nombre ASC";
         $vendedores = $wpdb->get_results($query);
@@ -2415,14 +2020,6 @@ class DM_Rifa_Unificado
                 GROUP BY r.vendedor_id
             ", OBJECT_K);
 
-            // 3. Obtener conteo de números asignados (físicos - éstos sí dependen del vendedor_id en números)
-            $asignados_raw = $wpdb->get_results("
-                SELECT vendedor_id, COUNT(*) as total 
-                FROM {$this->tbl_numeros} 
-                WHERE estado = 'asignado' 
-                GROUP BY vendedor_id
-            ", OBJECT_K);
-
             // 4. Obtener recaudación (reservas pagadas)
             $recaudado_raw = $wpdb->get_results("
                 SELECT vendedor_id, SUM(total) as total 
@@ -2443,13 +2040,14 @@ class DM_Rifa_Unificado
                 $vid = $v->id;
                 $v->ventas = isset($ventas_raw[$vid]) ? intval($ventas_raw[$vid]->total) : 0;
                 $v->reservadas = isset($reservadas_raw[$vid]) ? intval($reservadas_raw[$vid]->total) : 0;
-                $v->asignados = isset($asignados_raw[$vid]) ? intval($asignados_raw[$vid]->total) : 0;
                 $v->recaudado = isset($recaudado_raw[$vid]) ? floatval($recaudado_raw[$vid]->total) : 0;
                 $v->entregado = isset($entregado_raw[$vid]) ? floatval($entregado_raw[$vid]->total) : 0;
             }
         }
 
-        $has_mixto = $wpdb->get_var("SELECT COUNT(*) FROM {$this->tbl_rifas} WHERE modo_venta = 'mixto'");
+        // Link de la rifa activa para la "Guía WA" (una sola consulta para todo el listado)
+        $rifa_info = $wpdb->get_row("SELECT url_rifa FROM {$this->tbl_rifas} WHERE activo = 1 ORDER BY id DESC LIMIT 1");
+        $site_url = ($rifa_info && $rifa_info->url_rifa) ? $rifa_info->url_rifa : home_url();
         ?>
         <div class="wrap">
             <h1>Gestión de Vendedores</h1>
@@ -2488,35 +2086,6 @@ class DM_Rifa_Unificado
                     </form>
                 </div>
 
-                <?php if ($has_mixto > 0): ?>
-                    <div class="card" style="flex: 1; min-width: 300px; margin: 0;">
-                        <h2>Auto-Asignar Números</h2>
-                        <p class="description">Asigna aleatoriamente 10 números disponibles a cada vendedor que tenga menos de 10
-                            asignados.</p>
-                        <form method="post">
-                            <?php wp_nonce_field('dm_auto_assign_nonce'); ?>
-                            <p>
-                                <label>Rifa:</label>
-                                <select name="rifa_id" required>
-                                    <option value="">(Seleccionar Rifa)</option>
-                                    <?php
-                                    $context_rifa_id = $this->get_context_rifa_id();
-                                    $rifas_list = $wpdb->get_results("SELECT id, nombre FROM {$this->tbl_rifas} ORDER BY id DESC");
-                                    foreach ($rifas_list as $rl): ?>
-                                        <option value="<?php echo $rl->id; ?>" <?php selected($context_rifa_id, $rl->id); ?>>
-                                            <?php echo esc_html($rl->nombre); ?>
-                                        </option>
-                                    <?php endforeach; ?>
-                                </select>
-                            </p>
-                            <p>
-                                <button type="submit" name="dm_auto_assign_10" class="button button-primary"
-                                    onclick="return confirm('¿Asignar 10 números aleatorios a todos?')">Auto-Asignar 10 por
-                                    Vendedor</button>
-                            </p>
-                        </form>
-                    </div>
-                <?php endif; ?>
             </div>
 
             <div
@@ -2540,9 +2109,6 @@ class DM_Rifa_Unificado
                         <th>Recaudado</th>
                         <th>Entregado</th>
                         <th>Total</th>
-                        <?php if ($has_mixto > 0): ?>
-                            <th>Asignadas (Física)</th>
-                        <?php endif; ?>
                         <th>Acciones</th>
                     </tr>
                 </thead>
@@ -2567,48 +2133,13 @@ class DM_Rifa_Unificado
                                 <td
                                     style="font-weight:bold; color:<?php echo ($v->recaudado - $v->entregado) > 0 ? '#f9a825' : '#2e7d32'; ?>;">
                                     $<?php echo number_format($v->recaudado - $v->entregado, 0, ',', '.'); ?></td>
-                                <?php if ($has_mixto > 0): ?>
-                                    <td><span class="badge"
-                                            style="background:#ad1457; color:#fff; padding:2px 8px; border-radius:4px;"><?php echo intval($v->asignados); ?></span>
-                                    </td>
-                                <?php endif; ?>
                                 <td>
                                     <div style="display: flex; gap: 5px; flex-wrap: wrap;">
-                                        <?php if ($has_mixto > 0): ?>
-                                            <a href="<?php echo admin_url('admin.php?page=dm-rifa-vendedores&action=assign&id=' . $v->id); ?>"
-                                                class="button button-small" title="Asignar boletas físicas">Física</a>
-                                            <a href="<?php echo admin_url('admin.php?page=dm-rifa-vendedores&action=report_sale&id=' . $v->id); ?>"
-                                                class="button button-small" style="background:#2271b1; color:#fff;"
-                                                title="Informar venta de boletas asignadas">Venta</a>
-                                        <?php endif; ?>
-
                                         <a href="<?php echo admin_url('admin.php?page=dm-rifa-vendedores&action=edit&id=' . $v->id); ?>"
                                             class="button button-small" title="Editar datos del vendedor">Editar</a>
 
                                         <?php
-                                        // Generar link de WhatsApp con instrucciones
-                                        $v_nums = $wpdb->get_col(
-                                            "SELECT numero FROM {$this->tbl_numeros} WHERE vendedor_id = {$v->id} AND estado = 'asignado' ORDER BY CAST(numero AS UNSIGNED) ASC"
-                                        );
-                                        $nums_text = !empty($v_nums) ? implode(", ", $v_nums) : "Aún no tienes números asignados";
-                                        $site_url = home_url();
-                                        $msg = "Hola *" . esc_attr($v->nombre) . "*, te hemos asignado estos números para venta física 🎟️\n\n";
-                                        $msg .= "👉 *$nums_text*\n\n";
-                                        $msg .= "✅ *Instrucciones:* \n";
-                                        $msg .= "1. Realiza la venta y cobra al cliente.\n";
-                                        $msg .= "2. Reporta de inmediato al administrador para registrarla:\n";
-                                        $admin_wa = $wpdb->get_var("SELECT wa_e164 FROM {$this->tbl_rifas} WHERE activo = 1 LIMIT 1");
-                                        $msg .= "📲 WhatsApp " . ($admin_wa ?: '3123625582') . " (Administrador)\n";
-                                        $msg .= "Envía: Nombre del comprador + número vendido + comprobante.\n\n";
-                                        $msg .= "Estos números ya están bloqueados en la web para evitar que alguien más los compre.\n";
-                                        $msg .= "¡Muchos éxitos! 🚀";
-                                        $wa_url = "https://api.whatsapp.com/send?phone=" . preg_replace('/\D/', '', $v->telefono) . "&text=" . urlencode($msg);
-                                        ?>
-                                        <?php
-                                        // 2. Mensaje General de guía de venta
-                                        $rifa_info = $wpdb->get_row("SELECT url_rifa FROM {$this->tbl_rifas} WHERE activo = 1 LIMIT 1");
-                                        $site_url = ($rifa_info && $rifa_info->url_rifa) ? $rifa_info->url_rifa : home_url();
-
+                                        // Mensaje de guía de venta
                                         $msg_guia = "Hola *" . esc_attr($v->nombre) . "*, estas son las instrucciones para realizar las ventas de la rifa de manera correcta:
 
 🚀 *Paso a paso para vender:*
@@ -2630,7 +2161,7 @@ Apenas me confirmes el pago, yo activaré los números en el sistema y se genera
                                         $wa_url_guia = "https://api.whatsapp.com/send?phone=" . preg_replace('/\D/', '', $v->telefono) . "&text=" . urlencode($msg_guia);
                                         ?>
 
-                                        <a href="<?php echo $wa_url_guia; ?>" target="_blank" class="button button-small"
+                                        <a href="<?php echo esc_url($wa_url_guia); ?>" target="_blank" class="button button-small"
                                             style="background:#25D366; color:#fff; border-color:#25D366;"
                                             title="Enviar guía paso a paso al vendedor">Guía WA</a>
 
@@ -2646,7 +2177,7 @@ Apenas me confirmes el pago, yo activaré los números en el sistema y se genera
                             </tr>
                         <?php endforeach; else: ?>
                         <tr>
-                            <td colspan="7">No hay vendedores registrados.</td>
+                            <td colspan="10">No hay vendedores registrados.</td>
                         </tr>
                     <?php endif; ?>
                 </tbody>
@@ -3178,8 +2709,6 @@ Apenas me confirmes el pago, yo activaré los números en el sistema y se genera
                             $bg_color = '#d9f7d9';
                         elseif ($estado_actual === 'reservado')
                             $bg_color = '#fff5cc';
-                        elseif ($estado_actual === 'asignado')
-                            $bg_color = '#fce4ec'; // Rosa claro para asignado
                         ?>
                         <tr>
                             <td><input type="checkbox" name="numeros[]" class="dm-num-checkbox"
@@ -3278,11 +2807,11 @@ Apenas me confirmes el pago, yo activaré los números en el sistema y se genera
         $vendedor_id_val = $reserva->vendedor_id ? intval($reserva->vendedor_id) : 0;
 
         // Si no se enviaron números, pero la acción es pagar/reservar, asumimos TODOS los de la reserva
-        if (empty($numeros) && in_array($estado, array('reservado', 'pagado', 'asignado'))) {
+        if (empty($numeros) && in_array($estado, array('reservado', 'pagado'))) {
             $numeros = array_filter(array_map('trim', explode(',', $reserva->numeros_csv)));
         }
 
-        if (!in_array($estado, array('disponible', 'reservado', 'pagado', 'asignado')) || empty($numeros)) {
+        if (!in_array($estado, array('disponible', 'reservado', 'pagado')) || empty($numeros)) {
             error_log("DM RIFA ERROR: Invalid state ($estado) or empty numbers for reservation $reserva_id");
             wp_redirect(admin_url('admin.php?page=dm-rifa-compradores&rifa_id=' . $rifa_id . '&view=' . $reserva_id . '&error=1'));
             exit;
@@ -3330,7 +2859,7 @@ Apenas me confirmes el pago, yo activaré los números en el sistema y se genera
             // ─────────────────────────────────────────────────────────────────
 
         } else {
-            // Reservar, pagar o asignar: mantener/establecer reserva_id y vendedor_id
+            // Reservar o pagar: mantener/establecer reserva_id y vendedor_id
             $wpdb->query($wpdb->prepare(
                 "UPDATE {$this->tbl_numeros} SET estado = %s, reserva_id = %d, vendedor_id = %d, updated_at = NOW() WHERE rifa_id = %d AND numero IN ($place)",
                 array_merge(array($estado, $reserva_id, $vendedor_id_val, $rifa_id), $numeros)
@@ -3701,22 +3230,7 @@ Apenas me confirmes el pago, yo activaré los números en el sistema y se genera
         $fecha_inicio = sanitize_text_field($_GET['fecha_inicio'] ?? '');
         $fecha_fin = sanitize_text_field($_GET['fecha_fin'] ?? '');
 
-        $rifas = $wpdb->get_results("SELECT id, nombre, modo_venta FROM {$this->tbl_rifas} ORDER BY id DESC");
-
-        $is_virtual = false;
-        $has_mixto_global = $wpdb->get_var("SELECT COUNT(*) FROM {$this->tbl_rifas} WHERE modo_venta = 'mixto' AND activo = 1");
-
-        if ($rifa_id > 0) {
-            foreach ($rifas as $r) {
-                if ($r->id == $rifa_id && $r->modo_venta === 'virtual') {
-                    $is_virtual = true;
-                    break;
-                }
-            }
-        } elseif ($has_mixto_global == 0) {
-            // Si no hay rifas mixtas activas y estamos viendo "Todas", tratamos como virtual
-            $is_virtual = true;
-        }
+        $rifas = $wpdb->get_results("SELECT id, nombre FROM {$this->tbl_rifas} ORDER BY id DESC");
 
         // Preparar filtros
         $where_rifa_simple = $rifa_id ? $wpdb->prepare("AND rifa_id = %d", $rifa_id) : "";
@@ -3804,10 +3318,8 @@ Apenas me confirmes el pago, yo activaré los números en el sistema y se genera
                     <tr>
                         <th>Vendedor</th>
                         <th style="text-align: right;">Boletas Vendidas</th>
-                        <?php if (!$is_virtual): ?>
                             <th style="text-align: right;">Recaudo Efectivo</th>
                             <th style="text-align: right;">Recaudo Transferencia</th>
-                        <?php endif; ?>
                         <th style="text-align: right;">Total Recaudado</th>
                     </tr>
                 </thead>
@@ -3830,12 +3342,10 @@ Apenas me confirmes el pago, yo activaré los números en el sistema y se genera
                             <tr>
                                 <td><strong><?php echo esc_html($v->nombre); ?></strong></td>
                                 <td style="text-align: right;"><?php echo intval($v->boletas); ?></td>
-                                <?php if (!$is_virtual): ?>
                                     <td style="text-align: right;">$<?php echo number_format($v->efectivo ?: 0, 0, ',', '.'); ?>
                                     </td>
                                     <td style="text-align: right;">
                                         $<?php echo number_format($v->transferencia ?: 0, 0, ',', '.'); ?></td>
-                                <?php endif; ?>
                                 <td style="text-align: right; font-weight: bold; background: #f9f9f9;">
                                     $<?php echo number_format($row_total, 0, ',', '.'); ?></td>
                             </tr>
@@ -3843,19 +3353,17 @@ Apenas me confirmes el pago, yo activaré los números en el sistema y se genera
                         <tr style="background: #f0f0f1; font-weight: bold;">
                             <td>TOTAL GENERAL</td>
                             <td style="text-align: right;"><?php echo $total_global_boletas; ?></td>
-                            <?php if (!$is_virtual): ?>
                                 <td style="text-align: right;">$<?php echo number_format($total_global_efectivo, 0, ',', '.'); ?>
                                 </td>
                                 <td style="text-align: right;">
                                     $<?php echo number_format($total_global_transferencia, 0, ',', '.'); ?></td>
-                            <?php endif; ?>
                             <td style="text-align: right;">
                                 $<?php echo number_format(($total_global_efectivo + $total_global_transferencia), 0, ',', '.'); ?>
                             </td>
                         </tr>
                     <?php else: ?>
                         <tr>
-                            <td colspan="<?php echo $is_virtual ? 3 : 5; ?>">No hay datos de ventas registrados.</td>
+                            <td colspan="5">No hay datos de ventas registrados.</td>
                         </tr>
                     <?php endif; ?>
                 </tbody>
@@ -3897,9 +3405,6 @@ Apenas me confirmes el pago, yo activaré los números en el sistema y se genera
                     <option value="disponible">Disponibles</option>
                     <option value="reservado">Reservados</option>
                     <option value="pagado">Pagados</option>
-                    <?php if ($rifa->modo_venta !== 'virtual'): ?>
-                        <option value="asignado">Venta Física (Asignados)</option>
-                    <?php endif; ?>
                 </select>
                 <div class="dm-contador"><strong>Seleccionaste 0</strong> – Total: $0</div>
             </div>
@@ -3924,13 +3429,6 @@ Apenas me confirmes el pago, yo activaré los números en el sistema y se genera
                         style="background: var(--rifa-status-paid); border: 1px solid var(--rifa-status-paid-border);"></span>
                     <span>Pagado / No disponible</span>
                 </div>
-                <?php if ($rifa->modo_venta !== 'virtual'): ?>
-                    <div class="dm-convencion-item">
-                        <span class="dm-convencion-color"
-                            style="background: var(--rifa-status-assigned); border: 1px solid var(--rifa-status-assigned-border);"></span>
-                        <span>Venta Física</span>
-                    </div>
-                <?php endif; ?>
             </div>
 
             <div class="dm-grid" role="grid" aria-label="Números de la rifa"></div>

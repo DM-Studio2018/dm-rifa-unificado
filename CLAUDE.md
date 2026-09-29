@@ -2,7 +2,9 @@
 
 ## Contexto
 
-Plugin propio de **DM Studio SAS** para operar rifas: venta online (selector de números + reserva + confirmación por WhatsApp con pago Nequi/transferencia) y venta física a través de vendedores con números asignados, arqueos de caja e impresión de boletas.
+Plugin propio de **DM Studio SAS** para operar rifas: venta online (selector de números + reserva + confirmación por WhatsApp con pago Nequi/transferencia o efectivo), vendedores que venden a través del selector web (el comprador elige "Vendedor responsable"), arqueos de caja e impresión de boletas.
+
+> **Desde 2.0.0 no existe venta física** (asignar números a vendedores, reportar venta física, auto-asignar 10, estado `asignado`, modo de venta Mixto/Virtual). No volver a agregarla salvo pedido explícito.
 
 - **Estado:** en producción en dm-studio.com. Desarrollo activo.
 - **Versión en el código:** 2.0.0.
@@ -75,14 +77,16 @@ En producción existe además la carpeta `Google_Sans_Flex/` (fuente para las bo
 
 | Tabla | Contenido | Columnas relevantes |
 |---|---|---|
-| `dm_rifas` | Rifas | nombre, fecha, loteria, total_numeros, precio, wa_e164, gracias_page_id, boleta_id, url_rifa, meta_recaudo, **modo_venta** (`mixto` · `virtual`), activo |
-| `dm_rifa_numeros` | Un registro por número | numero (`000`…), **estado** (`disponible` · `asignado` · `reservado` · `pagado`), reserva_id, **vendedor_id** |
+| `dm_rifas` | Rifas | nombre, fecha, loteria, total_numeros, precio, wa_e164, gracias_page_id, boleta_id, url_rifa, meta_recaudo, activo. (`modo_venta` sigue en la tabla pero está **obsoleta** desde 2.0.0: no se lee ni se escribe) |
+| `dm_rifa_numeros` | Un registro por número | numero (`000`…), **estado** (`disponible` · `reservado` · `pagado`), reserva_id, vendedor_id (el de la reserva), updated_at |
 | `dm_rifa_reservas` | Compras/reservas | nombre, email, telefono, numeros_csv, precio_unit, total, **status** (`reservado` · `pagado` · `expirado`), token, vendedor_id, **forma_pago**, impreso, comprobante_url |
-| `dm_rifa_vendedores` | Vendedores físicos | nombre, email, telefono |
+| `dm_rifa_vendedores` | Vendedores | nombre, email, telefono |
 | `dm_rifa_boletas` | Plantillas de boleta | nombre, background_id, ticket_config (JSON de posiciones y tamaños) |
 | `dm_rifa_arqueos` | Entregas de dinero de vendedores | vendedor_id, rifa_id, monto, fecha, observaciones |
 
 **Migraciones:** `on_activate()` crea las tablas con `dbDelta`. Como el despliegue es por FTP (no se reactiva el plugin), las columnas nuevas se agregan con `ensure_rifas_columns()`, `ensure_reservas_columns()`, `ensure_numeros_columns()` y `ensure_arqueos_table()` en `admin_init`. Toda columna nueva debe ir también ahí.
+
+**Migraciones de datos únicas:** se controlan con una opción de WordPress. `migrar_sin_venta_fisica()` (2.0.0, llamada desde `ensure_numeros_columns()`): números `asignado` sin reserva → `disponible`; con reserva → `pagado`. Resultado en la opción `dm_rifa_migracion_200` (fecha, liberados, pagados).
 
 **Estados:** los estados `pago parcial` y `parcialmente liberado` de la v1.2.0 fueron eliminados (normalizados a `reservado` en feb-2026). Aún quedan referencias visuales en `page_compradores` (~línea 2867).
 
@@ -99,7 +103,7 @@ En producción existe además la carpeta `Google_Sans_Flex/` (fuente para las bo
 |---|---|---|
 | Rifas (crear, editar, activar) | `dm-rifa` | `page_rifas()` |
 | Reservas y Ventas | `dm-rifa-compradores` | `page_compradores()` |
-| Vendedores (alta, edición, asignación física de números, arqueos) | `dm-rifa-vendedores` | `page_vendedores()` |
+| Vendedores (alta, edición, importación por lote, guía por WhatsApp, reporte individual, arqueos y devoluciones) | `dm-rifa-vendedores` | `page_vendedores()` |
 | Dashboard | `dm-rifa-dashboard` | `page_dashboard()` |
 | Diseñador de Boletas | `dm-rifa-boletas` | `page_boletas()` |
 | Reportes (sin entrada en el menú) | — | `page_reportes()` |
@@ -116,17 +120,19 @@ En producción existe además la carpeta `Google_Sans_Flex/` (fuente para las bo
 - **1.2.0** (nov-2025) — Editar/eliminar rifas, resumen de ventas, sincronizar estados.
 - **feb-2026 (sin número de versión, en producción desde el 24-feb-2026)** — Vendedores y asignación física de números, forma de pago, arqueos, dashboard, diseñador e impresión de boletas, comprobantes, modo de venta por rifa, limpieza manual de vencidas, restauración de datos, refresco de estados en el front, corrección de numeros_csv por `reserva_id`.
   - Commit en GitHub del 6-feb-2026 ("Generador de boletas, Asignación de vendedores"); los cambios del 6 al 24-feb se consolidaron en git el 29-sep-2026.
-- **2.0.0** (29-sep-2026) — Numera como 2.0.0 los cambios de feb-2026. Corrige la asignación física de números a vendedores (`page_vendedores`): se reparó el JS corrupto de `updateHiddenNumeros()` (además se ejecuta en el `submit` del formulario); el handler de `dm_asignar_numeros` usa `numeros` y `numeros_check[]` como respaldo, valida que sean dígitos, **no libera nada si no llega ninguna selección** (muestra aviso), libera solo los números que el vendedor dejó de tener (con `vendedor_id = NULL` y `updated_at`) y reporta los que ya no estaban disponibles. Nota forense: hasta 1.x/feb-2026 ese handler era el único que liberaba con `vendedor_id = 0`; en datos anteriores a 2.0.0, `estado='disponible' AND vendedor_id = 0` identifica números liberados por él. Revisados los demás bloques `<script>` del archivo y `assets/*.js`: sin corrupción.
+- **2.0.0** (29-sep-2026) — Numera como 2.0.0 los cambios de feb-2026 y **elimina la venta física**:
+  - Fuera: asignación de números a vendedores, "Reportar venta física", auto-asignar 10, columna y botones "Física"/"Venta", mensaje de WhatsApp de números asignados, selector "Modelo de venta" (Mixto/Virtual), filtro y convención "Venta Física" en el front, estado `asignado`. Reportes muestran siempre efectivo/transferencia.
+  - Migración única `migrar_sin_venta_fisica()` para los números que quedaban en `asignado`.
+  - Contexto: la asignación física tenía un bug desde feb-2026 (JS de `updateHiddenNumeros()` corrupto → se liberaban todos los números del vendedor). Se corrigió en un commit y luego se eliminó la función completa. Ese handler era el único que liberaba con `vendedor_id = 0`: en datos anteriores a 2.0.0, `estado='disponible' AND vendedor_id = 0` identifica números liberados por él.
+  - Limpieza: quitado `display_errors`/`error_reporting(E_ALL)` y logs de depuración de `page_vendedores()` (incluido un log de `$_POST` completo); la consulta de la "Guía WA" ya no se repite por cada vendedor; `esc_url` en el enlace de la guía.
 
 ---
 
 ## Pendientes
 
 **🔴 Prioridad alta**
-- [x] ~~Bug en asignación física de vendedores~~ — corregido en 2.0.0.
-- [ ] Revisar en la base de producción (importada en Local) si hay vendedores que perdieron asignaciones por el bug: vendedores con reservas/ventas y cero números en estado `asignado`. Reasignar manualmente desde el admin.
+- [x] ~~Bug en asignación física de vendedores~~ — resuelto al eliminar la venta física en 2.0.0.
 - [x] ~~Subir la versión del plugin a `2.0.0`~~.
-- [ ] Limitación conocida de 2.0.0: para dejar a un vendedor con **cero** números asignados hay que desmarcar todos, y eso ahora se bloquea por seguridad. Si hace falta, agregar un botón explícito "Liberar todos" con confirmación.
 
 **Deuda técnica**
 - [ ] `status` de reservas es VARCHAR(12): suficiente para los estados actuales, pero ampliarlo a VARCHAR(20) si se agregan otros.
@@ -134,6 +140,8 @@ En producción existe además la carpeta `Google_Sans_Flex/` (fuente para las bo
 - [ ] Fuente de boletas: el código busca en `assets/fonts/...`, pero la carpeta `Google_Sans_Flex/` está en la raíz del plugin. Verificar qué fuente se está usando realmente y mover la carpeta a `assets/fonts/`.
 - [ ] Condición de carrera en `ajax_reservar()`: validar con `UPDATE ... WHERE estado='disponible'` y filas afectadas.
 - [ ] Revisar consultas N+1 en listados.
+- [ ] Quedan `error_log` de depuración en `admin_post_print_ticket()` (se escriben en cada boleta generada): limpiar.
+- [ ] Columna `modo_venta` obsoleta en `dm_rifas`: se puede eliminar más adelante con una migración.
 - [ ] El archivo principal tiene zonas con indentación inconsistente (formateo parcial): normalizar en un commit aparte, sin cambios de lógica.
 - [ ] Mover estilos inline del admin a `admin.css`.
 

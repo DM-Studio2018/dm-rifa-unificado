@@ -19,7 +19,8 @@
 
       if (st === 'reservado') $b.addClass('is-reservado').attr('aria-disabled', 'true');
       if (st === 'pagado') $b.addClass('is-pagado').attr('aria-disabled', 'true');
-      if (st === 'asignado') $b.addClass('is-asignado').attr('aria-disabled', 'true');
+      // Cualquier otro estado no disponible se muestra bloqueado
+      if (st && st !== 'disponible' && st !== 'reservado' && st !== 'pagado') $b.addClass('is-pagado').attr('aria-disabled', 'true');
 
       $grid.append($b);
     });
