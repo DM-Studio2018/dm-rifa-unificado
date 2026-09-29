@@ -2,7 +2,7 @@
 /**
  * Plugin Name: DM Rifa Unificado
  * Description: Selector de números, reservas y página de confirmación con WhatsApp + panel de gestión en el admin (todo en un solo plugin).
- * Version: 1.2.0
+ * Version: 2.0.0
  * Author: DM Studio SAS
  * License: GPL2
  */
@@ -14,7 +14,7 @@ if (!defined('ABSPATH')) {
 class DM_Rifa_Unificado
 {
     private static $instance = null;
-    private $version = '1.2.0';
+    private $version = '2.0.0';
     private $tbl_rifas;
     private $tbl_numeros;
     private $tbl_reservas;
@@ -1559,33 +1559,83 @@ class DM_Rifa_Unificado
         // Procesar asignación física de números
         if (isset($_POST['dm_asignar_numeros'])) {
             check_admin_referer('dm_assign_nonce');
-            $seller_id = intval($_POST['vendedor_id']);
-            $rifa_id = intval($_POST['rifa_id']);
-            $numeros_post = $_POST['numeros'] ?? '';
-            $numeros_seleccionados = array_filter(array_map('trim', explode(',', $numeros_post)));
+            $seller_id = intval($_POST['vendedor_id'] ?? 0);
+            $rifa_id = intval($_POST['rifa_id'] ?? 0);
 
-            // 1. Liberar números que estaban asignados a este vendedor (solo los que están en estado 'asignado')
-            $wpdb->query($wpdb->prepare(
-                "UPDATE {$this->tbl_numeros} SET estado = 'disponible', vendedor_id = 0 
-                 WHERE vendedor_id = %d AND rifa_id = %d AND estado = 'asignado'",
-                $seller_id,
-                $rifa_id
-            ));
+            // Fuente 1: campo oculto "numeros" (CSV armado por updateHiddenNumeros()).
+            $numeros_post = sanitize_text_field(wp_unslash($_POST['numeros'] ?? ''));
+            $desde_hidden = array_map('trim', explode(',', $numeros_post));
 
-            // 2. Asignar los nuevos números (solo si están disponibles)
-            $count = 0;
-            if (!empty($numeros_seleccionados)) {
-                foreach ($numeros_seleccionados as $num) {
-                    $res = $wpdb->update(
-                        $this->tbl_numeros,
-                        array('estado' => 'asignado', 'vendedor_id' => $seller_id),
-                        array('rifa_id' => $rifa_id, 'numero' => $num, 'estado' => 'disponible')
-                    );
-                    if ($res)
-                        $count++;
+            // Fuente 2 (respaldo): checkboxes numeros_check[] enviados por el navegador.
+            $desde_checks = isset($_POST['numeros_check']) && is_array($_POST['numeros_check'])
+                ? array_map('sanitize_text_field', wp_unslash($_POST['numeros_check']))
+                : array();
+
+            // Unión de ambas fuentes; solo se aceptan números (ej. "007").
+            $numeros_seleccionados = array();
+            foreach (array_merge($desde_hidden, $desde_checks) as $num) {
+                $num = trim((string) $num);
+                if ($num !== '' && ctype_digit($num)) {
+                    $numeros_seleccionados[$num] = $num;
                 }
             }
-            echo '<div class="updated"><p>' . intval($count) . ' números asignados al vendedor.</p></div>';
+            $numeros_seleccionados = array_values($numeros_seleccionados);
+
+            if ($seller_id <= 0 || $rifa_id <= 0) {
+                echo '<div class="notice notice-error"><p>Vendedor o rifa no válidos. No se realizó ningún cambio.</p></div>';
+            } elseif (empty($numeros_seleccionados)) {
+                // Protección: si no llega ninguna selección no se libera nada (antes se liberaban todos los números del vendedor).
+                echo '<div class="notice notice-warning"><p><strong>No se recibió ningún número seleccionado.</strong> Por seguridad no se liberó ni se asignó ningún número. Si quieres quitarle números al vendedor, deja marcados los que conserva y vuelve a guardar.</p></div>';
+            } else {
+                // 1. Liberar solo los números asignados a este vendedor que ya NO están seleccionados.
+                $placeholders = implode(',', array_fill(0, count($numeros_seleccionados), '%s'));
+                $liberados = $wpdb->query($wpdb->prepare(
+                    "UPDATE {$this->tbl_numeros} SET estado = 'disponible', vendedor_id = NULL, updated_at = NOW()
+                     WHERE vendedor_id = %d AND rifa_id = %d AND estado = 'asignado' AND numero NOT IN ($placeholders)",
+                    array_merge(array($seller_id, $rifa_id), $numeros_seleccionados)
+                ));
+
+                // 2. Asignar los seleccionados que estén disponibles (los que ya eran suyos se conservan).
+                $nuevos = 0;
+                $no_disponibles = array();
+                foreach ($numeros_seleccionados as $num) {
+                    $actual = $wpdb->get_row($wpdb->prepare(
+                        "SELECT estado, vendedor_id FROM {$this->tbl_numeros} WHERE rifa_id = %d AND numero = %s",
+                        $rifa_id,
+                        $num
+                    ));
+                    if (!$actual) {
+                        $no_disponibles[] = $num;
+                        continue;
+                    }
+                    if ($actual->estado === 'asignado' && intval($actual->vendedor_id) === $seller_id) {
+                        continue; // ya era suyo
+                    }
+                    $res = $wpdb->update(
+                        $this->tbl_numeros,
+                        array('estado' => 'asignado', 'vendedor_id' => $seller_id, 'updated_at' => current_time('mysql')),
+                        array('rifa_id' => $rifa_id, 'numero' => $num, 'estado' => 'disponible')
+                    );
+                    if ($res) {
+                        $nuevos++;
+                    } else {
+                        $no_disponibles[] = $num;
+                    }
+                }
+
+                $total_vendedor = intval($wpdb->get_var($wpdb->prepare(
+                    "SELECT COUNT(*) FROM {$this->tbl_numeros} WHERE vendedor_id = %d AND rifa_id = %d AND estado = 'asignado'",
+                    $seller_id,
+                    $rifa_id
+                )));
+
+                echo '<div class="notice notice-success"><p>Asignación actualizada: ' . intval($nuevos) . ' número(s) nuevos, '
+                    . intval($liberados) . ' liberado(s). El vendedor tiene ahora ' . intval($total_vendedor) . ' número(s) asignados en esta rifa.</p></div>';
+                if (!empty($no_disponibles)) {
+                    echo '<div class="notice notice-warning"><p>No se pudieron asignar porque ya no estaban disponibles: '
+                        . esc_html(implode(', ', $no_disponibles)) . '</p></div>';
+                }
+            }
         }
 
         // Procesar reporte de venta física
@@ -1675,7 +1725,7 @@ class DM_Rifa_Unificado
                         </p>
                     </form>
 
-                    <form method="post" action="">
+                    <form method="post" action="" id="dm-assign-form">
                         <?php wp_nonce_field('dm_assign_nonce'); ?>
                         <input type="hidden" name="vendedor_id" value="<?php echo $seller_id; ?>">
                         <input type="hidden" name="rifa_id" value="<?php echo $rifa_id; ?>">
@@ -1700,7 +1750,7 @@ class DM_Rifa_Unificado
                                 ?>
                                 <label
                                     style="display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 10px; border: 1px solid #ddd; border-radius: 4px; cursor: <?php echo $is_blocked ? 'not-allowed' : 'pointer'; ?>; background: <?php echo $bg; ?>; transition: all 0.2s;">
-                                    <input type="checkbox" name="numeros_check[]" value="<?php echo esc_attr($n->numero); ?>" <?php checked($is_mine); ?>                 <?php disabled($is_blocked); ?> class="assign-checkbox"
+                                    <input type="checkbox" name="numeros_check[]" value="<?php echo esc_attr($n->numero); ?>" <?php checked($is_mine); ?> <?php disabled($is_blocked); ?> class="assign-checkbox"
                                         style="margin-bottom: 5px;">
                                     <span style="font-weight: bold; font-size: 14px;"><?php echo esc_html($n->numero); ?></span>
                                     <?php if ($status_label): ?>
@@ -1720,11 +1770,18 @@ class DM_Rifa_Unificado
                 </div>
             </div>
             <script>
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        funct                            ion updateHi                                                               dden                                                 Numeros() {
-                                                                                      c        onst c        heckboxes = document.querySelectorAll('.assign-checkbox:che                            cked');
+                function updateHiddenNumeros() {
+                    const checkboxes = document.querySelectorAll('.assign-checkbox:checked');
                     const values = Array.from(checkboxes).map(cb => cb.value);
                     document.getElementById('numeros_hidden').value = values.join(',');
                 }
+                // Rellenar el campo oculto en cualquier envío (clic o Enter)
+                (function () {
+                    const form = document.getElementById('dm-assign-form');
+                    if (form) {
+                        form.addEventListener('submit', updateHiddenNumeros);
+                    }
+                })();
                 // Visual feedback enhancement
                 document.querySelectorAll('.assign-checkbox').forEach(cb => {
                     cb.addEventListener('change', function () {

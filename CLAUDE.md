@@ -5,7 +5,7 @@
 Plugin propio de **DM Studio SAS** para operar rifas: venta online (selector de números + reserva + confirmación por WhatsApp con pago Nequi/transferencia) y venta física a través de vendedores con números asignados, arqueos de caja e impresión de boletas.
 
 - **Estado:** en producción en dm-studio.com. Desarrollo activo.
-- **Versión en el código:** 1.2.0 (desactualizada: el plugin creció mucho desde esa versión; ver historial).
+- **Versión en el código:** 2.0.0.
 - **Repositorio:** https://github.com/DM-Studio2018/dm-rifa-unificado (rama `main`).
 - **Moneda:** COP, formato `180.000`.
 
@@ -116,14 +116,17 @@ En producción existe además la carpeta `Google_Sans_Flex/` (fuente para las bo
 - **1.2.0** (nov-2025) — Editar/eliminar rifas, resumen de ventas, sincronizar estados.
 - **feb-2026 (sin número de versión, en producción desde el 24-feb-2026)** — Vendedores y asignación física de números, forma de pago, arqueos, dashboard, diseñador e impresión de boletas, comprobantes, modo de venta por rifa, limpieza manual de vencidas, restauración de datos, refresco de estados en el front, corrección de numeros_csv por `reserva_id`.
   - Commit en GitHub del 6-feb-2026 ("Generador de boletas, Asignación de vendedores"); los cambios del 6 al 24-feb se consolidaron en git el 29-sep-2026.
+- **2.0.0** (29-sep-2026) — Numera como 2.0.0 los cambios de feb-2026. Corrige la asignación física de números a vendedores (`page_vendedores`): se reparó el JS corrupto de `updateHiddenNumeros()` (además se ejecuta en el `submit` del formulario); el handler de `dm_asignar_numeros` usa `numeros` y `numeros_check[]` como respaldo, valida que sean dígitos, **no libera nada si no llega ninguna selección** (muestra aviso), libera solo los números que el vendedor dejó de tener (con `vendedor_id = NULL` y `updated_at`) y reporta los que ya no estaban disponibles. Nota forense: hasta 1.x/feb-2026 ese handler era el único que liberaba con `vendedor_id = 0`; en datos anteriores a 2.0.0, `estado='disponible' AND vendedor_id = 0` identifica números liberados por él. Revisados los demás bloques `<script>` del archivo y `assets/*.js`: sin corrupción.
 
 ---
 
 ## Pendientes
 
 **🔴 Prioridad alta**
-- [ ] **Bug en asignación física de vendedores** (`page_vendedores`, ~líneas 1723-1724): el JS `updateHiddenNumeros()` está corrupto (espacios dentro de las palabras), así que el campo `numeros` llega vacío y el handler (~línea 1560) **libera todos los números asignados al vendedor sin asignar ninguno**. Corregir el JS y hacer que el servidor lea también `numeros_check[]` como respaldo. Revisar si hay vendedores que perdieron asignaciones.
-- [ ] Subir la versión del plugin (p. ej. `2.0.0`) para reflejar los cambios de feb-2026.
+- [x] ~~Bug en asignación física de vendedores~~ — corregido en 2.0.0.
+- [ ] Revisar en la base de producción (importada en Local) si hay vendedores que perdieron asignaciones por el bug: vendedores con reservas/ventas y cero números en estado `asignado`. Reasignar manualmente desde el admin.
+- [x] ~~Subir la versión del plugin a `2.0.0`~~.
+- [ ] Limitación conocida de 2.0.0: para dejar a un vendedor con **cero** números asignados hay que desmarcar todos, y eso ahora se bloquea por seguridad. Si hace falta, agregar un botón explícito "Liberar todos" con confirmación.
 
 **Deuda técnica**
 - [ ] `status` de reservas es VARCHAR(12): suficiente para los estados actuales, pero ampliarlo a VARCHAR(20) si se agregan otros.
