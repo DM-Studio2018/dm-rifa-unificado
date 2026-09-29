@@ -467,11 +467,143 @@ class DM_Rifa_Unificado
         ));
     }
 
-    /** Link personal del vendedor: página de la rifa + ?v=ID (la venta queda a su nombre). */
+    /**
+     * Páginas publicadas que contienen [rifa_selector id="N"], agrupadas por rifa.
+     * Busca en el contenido (editor clásico, Enfold) y en los datos de Elementor.
+     * @return array rifa_id => [ ['id' => post_id, 'titulo' => ..., 'url' => ...], ... ]
+     */
+    private function paginas_por_rifa()
+    {
+        static $cache = null;
+        if ($cache !== null) {
+            return $cache;
+        }
+        global $wpdb;
+        $cache = array();
+        $patron = '/rifa_selector[^\]]*?\bid\s*=\s*(?:\\\\)?["\']?(\d+)/i';
+
+        $fuentes = array();
+        $posts = $wpdb->get_results(
+            "SELECT ID, post_content AS contenido FROM {$wpdb->posts}
+             WHERE post_status = 'publish' AND post_type NOT IN ('revision', 'nav_menu_item')
+               AND post_content LIKE '%rifa_selector%'"
+        );
+        foreach ((array) $posts as $row) {
+            $fuentes[] = $row;
+        }
+        $elementor = $wpdb->get_results(
+            "SELECT p.ID, m.meta_value AS contenido FROM {$wpdb->postmeta} m
+             JOIN {$wpdb->posts} p ON p.ID = m.post_id
+             WHERE m.meta_key = '_elementor_data' AND p.post_status = 'publish'
+               AND p.post_type NOT IN ('revision', 'nav_menu_item')
+               AND m.meta_value LIKE '%rifa_selector%'"
+        );
+        foreach ((array) $elementor as $row) {
+            $fuentes[] = $row;
+        }
+
+        foreach ($fuentes as $row) {
+            if (!preg_match_all($patron, (string) $row->contenido, $m)) {
+                continue;
+            }
+            foreach (array_unique(array_map('intval', $m[1])) as $rid) {
+                $cache[$rid][intval($row->ID)] = array(
+                    'id' => intval($row->ID),
+                    'titulo' => get_the_title($row->ID),
+                    'url' => get_permalink($row->ID),
+                );
+            }
+        }
+        foreach ($cache as $rid => $paginas) {
+            $cache[$rid] = array_values($paginas);
+        }
+        return $cache;
+    }
+
+    /**
+     * URL pública de la rifa. Manda la página donde está su shortcode;
+     * el campo "URL de la Rifa" solo se usa si coincide con esa página o si no se detecta ninguna.
+     */
+    private function url_publica_rifa($rifa)
+    {
+        if (!$rifa) {
+            return '';
+        }
+        $paginas = $this->paginas_por_rifa()[intval($rifa->id)] ?? array();
+        $manual = !empty($rifa->url_rifa) ? $rifa->url_rifa : '';
+        if ($paginas) {
+            foreach ($paginas as $pg) {
+                if ($manual && untrailingslashit($pg['url']) === untrailingslashit($manual)) {
+                    return $manual;
+                }
+            }
+            return $paginas[0]['url'];
+        }
+        // Sin página detectada: la URL manual solo sirve si no es la página de OTRA rifa
+        if ($manual && $this->rifa_de_url($manual)) {
+            return '';
+        }
+        return $manual;
+    }
+
+    /** Si la URL corresponde a la página detectada de alguna rifa, devuelve [rifa_id, título]; si no, null. */
+    private function rifa_de_url($url)
+    {
+        foreach ($this->paginas_por_rifa() as $rid => $paginas) {
+            foreach ($paginas as $pg) {
+                if (untrailingslashit($pg['url']) === untrailingslashit($url)) {
+                    return array($rid, $pg['titulo']);
+                }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Diagnóstico de la página de una rifa para mostrar en el admin.
+     * @return array ['tipo' => ok|aviso|error, 'texto' => ...]
+     */
+    private function estado_pagina_rifa($rifa)
+    {
+        $paginas = $this->paginas_por_rifa()[intval($rifa->id)] ?? array();
+        $manual = !empty($rifa->url_rifa) ? $rifa->url_rifa : '';
+        if (!$paginas) {
+            $sc = '[rifa_selector id="' . intval($rifa->id) . '"]';
+            $otra = $manual ? $this->rifa_de_url($manual) : null;
+            if ($otra) {
+                return array(
+                    'tipo' => 'error',
+                    'texto' => 'Ninguna página publicada tiene el shortcode ' . $sc . '. El campo "URL de la Rifa" apunta a "'
+                        . $otra[1] . '", que hoy muestra la rifa #' . $otra[0] . ', no esta.',
+                );
+            }
+            if ($manual) {
+                return array(
+                    'tipo' => 'aviso',
+                    'texto' => 'No se encontró el shortcode ' . $sc . ' en ninguna página publicada; se usa la URL escrita a mano sin poder verificarla: ' . $manual,
+                );
+            }
+            return array('tipo' => 'error', 'texto' => 'Ninguna página publicada tiene el shortcode ' . $sc . '.');
+        }
+        $url = $this->url_publica_rifa($rifa);
+        $texto = 'Página: ' . $paginas[0]['titulo'] . ' — ' . $url;
+        if (count($paginas) > 1) {
+            $texto .= ' (hay ' . count($paginas) . ' páginas con este shortcode)';
+        }
+        if ($manual && untrailingslashit($manual) !== untrailingslashit($url)) {
+            return array(
+                'tipo' => 'aviso',
+                'texto' => $texto . '. Ojo: el campo "URL de la Rifa" dice ' . $manual . ', que no muestra esta rifa; se usa la página detectada.',
+            );
+        }
+        return array('tipo' => 'ok', 'texto' => $texto);
+    }
+
+    /** Link personal del vendedor: página real de la rifa + ?v=ID. Vacío si la rifa no está publicada. */
     private function link_vendedor($rifa, $vendedor_id)
     {
-        $base = ($rifa && !empty($rifa->url_rifa)) ? $rifa->url_rifa : home_url('/');
-        return add_query_arg('v', intval($vendedor_id), $base);
+        $base = $this->url_publica_rifa($rifa);
+        return $base ? add_query_arg('v', intval($vendedor_id), $base) : '';
     }
 
     private function fetch_reserva($id)
@@ -1242,8 +1374,16 @@ class DM_Rifa_Unificado
                         <td><input type="url" name="url_rifa" class="large-text"
                                 value="<?php echo $edit_rifa ? esc_url($edit_rifa->url_rifa) : ''; ?>"
                                 placeholder="<?php echo home_url('/rifa-2025'); ?>">
-                            <p class="description">Link completo de la página donde pusiste el shortcode de la rifa. Se
-                                usará en las instrucciones enviadas a los vendedores.</p>
+                            <p class="description">Opcional. El plugin detecta solo la página donde está el shortcode de esta rifa
+                                y la usa para los links de los vendedores; este campo solo cuenta si coincide con esa página.</p>
+                            <?php if ($edit_rifa):
+                                $diag = $this->estado_pagina_rifa($edit_rifa);
+                                $color = array('ok' => '#00a32a', 'aviso' => '#dba617', 'error' => '#d63638')[$diag['tipo']];
+                                ?>
+                                <p style="margin-top:8px; padding:8px 10px; border-left:4px solid <?php echo $color; ?>; background:#f6f7f7;">
+                                    <?php echo esc_html($diag['texto']); ?>
+                                </p>
+                            <?php endif; ?>
                         </td>
                     </tr>
                     <tr>
@@ -1353,7 +1493,23 @@ class DM_Rifa_Unificado
                                 </td>
                                 <td><strong>$<?php echo number_format($recaudo, 0, ',', '.'); ?></strong></td>
                                 <td><?php echo esc_html($r->wa_e164); ?></td>
-                                <td><code>[rifa_selector id="<?php echo esc_attr($r->id); ?>"]</code></td>
+                                <td>
+                                    <code>[rifa_selector id="<?php echo esc_attr($r->id); ?>"]</code>
+                                    <?php
+                                    $diag = $this->estado_pagina_rifa($r);
+                                    $url_pub = $this->url_publica_rifa($r);
+                                    ?>
+                                    <br>
+                                    <?php if ($diag['tipo'] === 'error'): ?>
+                                        <small style="color:#d63638;" title="<?php echo esc_attr($diag['texto']); ?>">⚠ Sin página publicada</small>
+                                    <?php else: ?>
+                                        <small><a href="<?php echo esc_url($url_pub); ?>" target="_blank" rel="noopener">Ver página</a>
+                                            <?php if ($diag['tipo'] === 'aviso'): ?>
+                                                <span style="color:#996800;" title="<?php echo esc_attr($diag['texto']); ?>">⚠ revisar URL</span>
+                                            <?php endif; ?>
+                                        </small>
+                                    <?php endif; ?>
+                                </td>
                                 <td>
                                     <a class="button"
                                         href="<?php echo admin_url('admin.php?page=dm-rifa-compradores&rifa_id=' . intval($r->id)); ?>">Ver
@@ -2279,6 +2435,19 @@ class DM_Rifa_Unificado
                     </a>
                 <?php endif; ?>
             </form>
+
+            <?php if ($rifa_actual && !$ver_sin_rifa && !$this->url_publica_rifa($rifa_actual)): ?>
+                <div class="notice notice-error"><p><strong>Los links de los vendedores no están disponibles:</strong>
+                    <?php echo esc_html($this->estado_pagina_rifa($rifa_actual)['texto']); ?>
+                    Pon el shortcode <code>[rifa_selector id="<?php echo intval($rifa_actual_id); ?>"]</code> en la página de la rifa y publícala.</p></div>
+            <?php elseif ($rifa_actual && !$ver_sin_rifa):
+                $diag_actual = $this->estado_pagina_rifa($rifa_actual); ?>
+                <?php if ($diag_actual['tipo'] === 'aviso'): ?>
+                    <div class="notice notice-warning"><p><?php echo esc_html($diag_actual['texto']); ?></p></div>
+                <?php endif; ?>
+                <p style="margin:10px 0 0; color:#555;">🌐 Página de la rifa:
+                    <a href="<?php echo esc_url($this->url_publica_rifa($rifa_actual)); ?>" target="_blank" rel="noopener"><?php echo esc_html($this->url_publica_rifa($rifa_actual)); ?></a></p>
+            <?php endif; ?>
 
             <?php if (!$rifas_all): ?>
                 <div class="notice notice-info"><p>Primero crea una rifa en <a href="<?php echo esc_url(admin_url('admin.php?page=dm-rifa')); ?>">DM Rifas</a>.</p></div>
@@ -3590,6 +3759,13 @@ Apenas confirme el pago, activo los números y se genera la boleta digital para 
                         $v_param
                     ));
                 }
+                if ($v_param > 0 && !$vendedor_link && current_user_can('manage_options')):
+                    ?>
+                    <p class="dm-aviso-admin" style="background:#fcf0f1; border-left:4px solid #d63638; padding:8px 10px;">
+                        (Solo lo ves tú como administrador) El vendedor #<?php echo intval($v_param); ?> no es del equipo de esta rifa
+                        (id <?php echo intval($rifa_id); ?>), por eso el link no lo asigna. Revisa en Vendedores a qué rifa pertenece.
+                    </p>
+                <?php endif;
                 if ($vendedor_link):
                     ?>
                     <input type="hidden" class="dm-vendedor" value="<?php echo intval($vendedor_link->id); ?>">

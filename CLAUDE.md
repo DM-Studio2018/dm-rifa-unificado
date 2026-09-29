@@ -79,7 +79,7 @@ En producción existe además la carpeta `Google_Sans_Flex/` (fuente para las bo
 
 | Tabla | Contenido | Columnas relevantes |
 |---|---|---|
-| `dm_rifas` | Rifas | nombre, fecha, loteria, total_numeros, precio, wa_e164, gracias_page_id, boleta_id, url_rifa, meta_recaudo, activo. (`modo_venta` sigue en la tabla pero está **obsoleta** desde 2.0.0: no se lee ni se escribe) |
+| `dm_rifas` | Rifas | nombre, fecha, loteria, total_numeros, precio, wa_e164, gracias_page_id, boleta_id, url_rifa (opcional, ver "Página de cada rifa"), meta_recaudo, activo. (`modo_venta` sigue en la tabla pero está **obsoleta** desde 2.0.0: no se lee ni se escribe) |
 | `dm_rifa_numeros` | Un registro por número | numero (`000`…), **estado** (`disponible` · `reservado` · `pagado`), reserva_id, vendedor_id (el de la reserva), updated_at |
 | `dm_rifa_reservas` | Compras/reservas | nombre, email, telefono, numeros_csv, precio_unit, total, **status** (`reservado` · `pagado` · `expirado`), token, vendedor_id, **forma_pago**, impreso, comprobante_url |
 | `dm_rifa_vendedores` | Vendedores (equipo de una rifa) | **rifa_id**, nombre, email, telefono |
@@ -90,6 +90,8 @@ En producción existe además la carpeta `Google_Sans_Flex/` (fuente para las bo
 
 **Migraciones de datos únicas:** se controlan con una opción de WordPress. `migrar_sin_venta_fisica()` (2.0.0, llamada desde `ensure_numeros_columns()`): números `asignado` sin reserva → `disponible`; con reserva → `pagado`. Resultado en la opción `dm_rifa_migracion_200` (fecha, liberados, pagados).
 `ensure_vendedores_columns()` (2.0.0): agrega `rifa_id` a vendedores y, una sola vez, asigna a cada vendedor la rifa donde tiene más reservas (si no tiene, la de su último arqueo); completa `rifa_id` vacío en arqueos. Resultado en `dm_rifa_migracion_200_vendedores` (con_rifa, sin_rifa, arqueos_completados).
+
+**Página de cada rifa:** cada rifa tiene su propia página con `[rifa_selector id="N"]`. `paginas_por_rifa()` la detecta buscando el shortcode en páginas publicadas (contenido del editor/Enfold y `_elementor_data`). `url_publica_rifa()` usa esa página; el campo `url_rifa` solo cuenta si coincide con ella o si no se detecta ninguna, y nunca si apunta a la página de otra rifa. `estado_pagina_rifa()` muestra el diagnóstico en Rifas (listado y edición) y en Vendedores. Si una rifa no tiene página, sus vendedores no tienen link.
 
 **Regla de pertenencia:** `sql_vendedor_en_rifa()` = vendedor del equipo de la rifa **o** con reservas en ella (para no perder ventas históricas en los reportes). El selector público y el link `?v=` solo aceptan el equipo (`vendedor_es_de_rifa()`).
 
@@ -129,7 +131,7 @@ En producción existe además la carpeta `Google_Sans_Flex/` (fuente para las bo
   - Migración única `migrar_sin_venta_fisica()` para los números que quedaban en `asignado`.
   - Contexto: la asignación física tenía un bug desde feb-2026 (JS de `updateHiddenNumeros()` corrupto → se liberaban todos los números del vendedor). Se corrigió en un commit y luego se eliminó la función completa. Ese handler era el único que liberaba con `vendedor_id = 0`: en datos anteriores a 2.0.0, `estado='disponible' AND vendedor_id = 0` identifica números liberados por él.
   - **Vendedores por rifa:** columna `rifa_id` + migración; listado, dashboard, exportación y detalle de reserva filtrados por rifa; borrar un vendedor solo si no tiene reservas ni arqueos. Eliminado `page_reportes()` (consolidado, sin menú y roto).
-  - **Link por vendedor** (`?v=ID`) con botón "🔗 Link" y guía WA que lo incluye.
+  - **Link por vendedor** (`?v=ID`) con botón "🔗 Link" y guía WA que lo incluye. El link usa la página real de la rifa (detectada por el shortcode), no el campo `url_rifa`, que puede quedar desactualizado al reutilizar una página. Si el `?v=` no es del equipo de esa rifa, el administrador ve un aviso en el front.
   - **Reserva atómica** en `ajax_reservar()`: sin choques entre compradores simultáneos; valida vendedor y forma de pago.
   - Assets del front versionados con `$this->version` (antes `1.2.5` fijo: el navegador podía usar JS/CSS viejos).
   - Limpieza: quitado `display_errors`/`error_reporting(E_ALL)` y logs de depuración de `page_vendedores()` (incluido un log de `$_POST` completo); la consulta de la "Guía WA" ya no se repite por cada vendedor; `esc_url` en el enlace de la guía.
