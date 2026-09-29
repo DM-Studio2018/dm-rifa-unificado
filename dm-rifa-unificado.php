@@ -72,6 +72,7 @@ class DM_Rifa_Unificado
         add_action('admin_init', array($this, 'ensure_reservas_columns'));
         add_action('admin_init', array($this, 'ensure_numeros_columns'));
         add_action('admin_init', array($this, 'ensure_arqueos_table'));
+        add_action('admin_init', array($this, 'ensure_vendedores_columns'));
     }
 
     public function on_activate()
@@ -138,11 +139,13 @@ class DM_Rifa_Unificado
 
         $sql_vendedores = "CREATE TABLE {$this->tbl_vendedores} (
             id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+            rifa_id BIGINT UNSIGNED NULL,
             nombre VARCHAR(120) NOT NULL,
             email VARCHAR(120) NULL,
             telefono VARCHAR(30) NULL,
             created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
-            PRIMARY KEY (id)
+            PRIMARY KEY (id),
+            KEY idx_rifa (rifa_id)
         ) $charset;";
 
         $sql_boletas = "CREATE TABLE {$this->tbl_boletas} (
@@ -258,6 +261,73 @@ class DM_Rifa_Unificado
         ), false);
     }
 
+    /**
+     * 2.0.0 — Cada vendedor pertenece a una rifa (cada rifa trae su equipo).
+     * Agrega la columna rifa_id y, una sola vez, asigna la rifa a los vendedores existentes:
+     * la rifa donde tiene más reservas; si no tiene reservas, la de su último arqueo.
+     * También completa rifa_id en arqueos antiguos que lo tenían vacío.
+     * Resultado en la opción dm_rifa_migracion_200_vendedores.
+     */
+    public function ensure_vendedores_columns()
+    {
+        global $wpdb;
+        $columns = $wpdb->get_col("SHOW COLUMNS FROM {$this->tbl_vendedores}");
+        if (!is_array($columns) || empty($columns)) {
+            return;
+        }
+        if (!in_array('rifa_id', $columns)) {
+            $wpdb->query("ALTER TABLE {$this->tbl_vendedores} ADD COLUMN rifa_id BIGINT UNSIGNED NULL AFTER id, ADD KEY idx_rifa (rifa_id)");
+        }
+        if (get_option('dm_rifa_migracion_200_vendedores')) {
+            return;
+        }
+
+        $por_reservas = $wpdb->query(
+            "UPDATE {$this->tbl_vendedores} v
+             SET v.rifa_id = (
+                 SELECT r.rifa_id FROM {$this->tbl_reservas} r
+                 WHERE r.vendedor_id = v.id
+                 GROUP BY r.rifa_id
+                 ORDER BY COUNT(*) DESC, r.rifa_id DESC
+                 LIMIT 1
+             )
+             WHERE v.rifa_id IS NULL"
+        );
+
+        $por_arqueos = 0;
+        $arqueos_completados = 0;
+        if ($wpdb->get_var("SHOW TABLES LIKE '{$this->tbl_arqueos}'")) {
+            $por_arqueos = $wpdb->query(
+                "UPDATE {$this->tbl_vendedores} v
+                 SET v.rifa_id = (
+                     SELECT a.rifa_id FROM {$this->tbl_arqueos} a
+                     WHERE a.vendedor_id = v.id AND a.rifa_id IS NOT NULL
+                     ORDER BY a.fecha DESC
+                     LIMIT 1
+                 )
+                 WHERE v.rifa_id IS NULL"
+            );
+            $arqueos_completados = $wpdb->query(
+                "UPDATE {$this->tbl_arqueos} a
+                 JOIN {$this->tbl_vendedores} v ON v.id = a.vendedor_id
+                 SET a.rifa_id = v.rifa_id
+                 WHERE a.rifa_id IS NULL AND v.rifa_id IS NOT NULL"
+            );
+        }
+
+        if ($por_reservas === false || $por_arqueos === false || $arqueos_completados === false) {
+            error_log('DM Rifa: error en la migración 2.0.0 de vendedores: ' . $wpdb->last_error);
+            return; // se reintenta en la próxima carga del admin
+        }
+
+        update_option('dm_rifa_migracion_200_vendedores', array(
+            'fecha' => current_time('mysql'),
+            'con_rifa' => intval($wpdb->get_var("SELECT COUNT(*) FROM {$this->tbl_vendedores} WHERE rifa_id IS NOT NULL")),
+            'sin_rifa' => intval($wpdb->get_var("SELECT COUNT(*) FROM {$this->tbl_vendedores} WHERE rifa_id IS NULL")),
+            'arqueos_completados' => intval($arqueos_completados),
+        ), false);
+    }
+
     public function ensure_arqueos_table()
     {
         global $wpdb;
@@ -287,12 +357,12 @@ class DM_Rifa_Unificado
     /* ---------------------- Assets ---------------------- */
     public function enqueue_front()
     {
-        wp_enqueue_script('dm-rifa-front', plugins_url('assets/frontend.js', __FILE__), array('jquery'), '1.2.5', true);
+        wp_enqueue_script('dm-rifa-front', plugins_url('assets/frontend.js', __FILE__), array('jquery'), $this->version, true);
         wp_localize_script('dm-rifa-front', 'DMRIFA', array(
             'ajax' => admin_url('admin-ajax.php'),
             'nonce' => wp_create_nonce('dm_rifa_nonce')
         ));
-        wp_enqueue_style('dm-rifa-style', plugins_url('assets/style.css', __FILE__), array(), '1.2.5');
+        wp_enqueue_style('dm-rifa-style', plugins_url('assets/style.css', __FILE__), array(), $this->version);
     }
 
     public function enqueue_admin($hook)
@@ -367,6 +437,41 @@ class DM_Rifa_Unificado
         }
 
         return 0;
+    }
+
+    /**
+     * Condición SQL: el vendedor (alias $alias) es de la rifa $rifa_id:
+     * pertenece a su equipo o tiene reservas en ella.
+     */
+    private function sql_vendedor_en_rifa($alias, $rifa_id)
+    {
+        global $wpdb;
+        return $wpdb->prepare(
+            "({$alias}.rifa_id = %d OR EXISTS (SELECT 1 FROM {$this->tbl_reservas} x WHERE x.vendedor_id = {$alias}.id AND x.rifa_id = %d))",
+            $rifa_id,
+            $rifa_id
+        );
+    }
+
+    /** ¿El vendedor es del equipo de esta rifa? */
+    private function vendedor_es_de_rifa($vendedor_id, $rifa_id)
+    {
+        global $wpdb;
+        if ($vendedor_id <= 0 || $rifa_id <= 0) {
+            return false;
+        }
+        return (bool) $wpdb->get_var($wpdb->prepare(
+            "SELECT COUNT(*) FROM {$this->tbl_vendedores} WHERE id = %d AND rifa_id = %d",
+            $vendedor_id,
+            $rifa_id
+        ));
+    }
+
+    /** Link personal del vendedor: página de la rifa + ?v=ID (la venta queda a su nombre). */
+    private function link_vendedor($rifa, $vendedor_id)
+    {
+        $base = ($rifa && !empty($rifa->url_rifa)) ? $rifa->url_rifa : home_url('/');
+        return add_query_arg('v', intval($vendedor_id), $base);
     }
 
     private function fetch_reserva($id)
@@ -505,7 +610,8 @@ class DM_Rifa_Unificado
         }
 
         // Estadísticas de la rifa seleccionada
-        $total_vendedores = $wpdb->get_var("SELECT COUNT(*) FROM {$this->tbl_vendedores}");
+        $cond_equipo = $this->sql_vendedor_en_rifa('v', $selected_rifa_id);
+        $total_vendedores = $wpdb->get_var("SELECT COUNT(*) FROM {$this->tbl_vendedores} v WHERE $cond_equipo");
 
         $stats_query = $wpdb->prepare("
             SELECT 
@@ -550,6 +656,7 @@ class DM_Rifa_Unificado
             (SELECT SUM(res.total) FROM {$this->tbl_reservas} res 
              WHERE res.vendedor_id = v.id AND res.status = 'pagado' AND res.rifa_id = %d) as recaudado
             FROM {$this->tbl_vendedores} v
+            WHERE $cond_equipo
             HAVING ventas > 0
             ORDER BY ventas DESC
             LIMIT 5
@@ -562,6 +669,7 @@ class DM_Rifa_Unificado
              JOIN {$this->tbl_reservas} res ON n.reserva_id = res.id 
              WHERE res.vendedor_id = v.id AND n.estado = 'pagado' AND res.rifa_id = %d) as ventas
             FROM {$this->tbl_vendedores} v
+            WHERE $cond_equipo
             HAVING ventas < 20
             ORDER BY ventas ASC
             LIMIT 10
@@ -582,6 +690,7 @@ class DM_Rifa_Unificado
             (SELECT SUM(res.total) FROM {$this->tbl_reservas} res 
              WHERE res.vendedor_id = v.id AND res.status = 'reservado' AND res.rifa_id = %d) as monto_pendiente
             FROM {$this->tbl_vendedores} v
+            WHERE $cond_equipo
             HAVING boletas_reservadas > 0
             ORDER BY boletas_reservadas DESC
             LIMIT 15
@@ -606,10 +715,9 @@ class DM_Rifa_Unificado
             }
         }
 
-        // Total entregado en caja física (arqueos) para esta rifa
-        // Incluye también arqueos guardados sin rifa_id (NULL) para no perder registros históricos
+        // Total entregado por los vendedores (arqueos) en esta rifa
         $total_arqueos = floatval($wpdb->get_var($wpdb->prepare(
-            "SELECT COALESCE(SUM(monto), 0) FROM {$this->tbl_arqueos} WHERE rifa_id = %d OR rifa_id IS NULL",
+            "SELECT COALESCE(SUM(monto), 0) FROM {$this->tbl_arqueos} WHERE rifa_id = %d",
             $selected_rifa_id
         )));
 
@@ -1320,15 +1428,46 @@ class DM_Rifa_Unificado
             $table_exists = $wpdb->get_var("SHOW TABLES LIKE '{$this->tbl_vendedores}'");
         }
 
+        // Rifas y rifa de trabajo (cada rifa tiene su propio equipo de vendedores)
+        $rifas_all = $wpdb->get_results("SELECT id, nombre, activo, url_rifa FROM {$this->tbl_rifas} ORDER BY id DESC");
+        $rifas_por_id = array();
+        foreach ((array) $rifas_all as $r) {
+            $rifas_por_id[intval($r->id)] = $r;
+        }
+        $ver_sin_rifa = !empty($_GET['sin_rifa']);
+        $rifa_actual_id = $ver_sin_rifa ? 0 : $this->get_context_rifa_id();
+        if (!$ver_sin_rifa && !isset($rifas_por_id[$rifa_actual_id]) && $rifas_all) {
+            $rifa_actual_id = 0;
+            foreach ($rifas_all as $r) {
+                if ($r->activo) {
+                    $rifa_actual_id = intval($r->id);
+                    break;
+                }
+            }
+            if (!$rifa_actual_id) {
+                $rifa_actual_id = intval($rifas_all[0]->id);
+            }
+        }
+        $rifa_actual = $rifas_por_id[$rifa_actual_id] ?? null;
+
         // Procesar creación
         if (isset($_POST['dm_crear_vendedor'])) {
             check_admin_referer('dm_vendedor_nonce');
-            $res = $wpdb->insert($this->tbl_vendedores, array(
-                'nombre' => sanitize_text_field($_POST['nombre']),
-                'email' => sanitize_email($_POST['email']),
-                'telefono' => sanitize_text_field($_POST['telefono'])
-            ));
-            if ($res === false) {
+            $nuevo_rifa_id = intval($_POST['rifa_id'] ?? 0);
+            if (!isset($rifas_por_id[$nuevo_rifa_id])) {
+                echo '<div class="error"><p>Selecciona la rifa a la que pertenece el vendedor.</p></div>';
+                $res = null;
+            } else {
+                $res = $wpdb->insert($this->tbl_vendedores, array(
+                    'rifa_id' => $nuevo_rifa_id,
+                    'nombre' => sanitize_text_field(wp_unslash($_POST['nombre'] ?? '')),
+                    'email' => sanitize_email(wp_unslash($_POST['email'] ?? '')),
+                    'telefono' => sanitize_text_field(wp_unslash($_POST['telefono'] ?? ''))
+                ));
+            }
+            if ($res === null) {
+                // error ya mostrado
+            } elseif ($res === false) {
                 error_log("DM Rifa: error al insertar vendedor: " . $wpdb->last_error);
                 echo '<div class="error"><p>Error al crear el vendedor: ' . esc_html($wpdb->last_error) . '</p></div>';
             } else {
@@ -1340,25 +1479,47 @@ class DM_Rifa_Unificado
         if (isset($_POST['dm_editar_vendedor'])) {
             check_admin_referer('dm_edit_vendedor_nonce');
             $seller_id = intval($_POST['vendedor_id']);
-            $wpdb->update($this->tbl_vendedores, array(
-                'nombre' => sanitize_text_field($_POST['nombre']),
-                'email' => sanitize_email($_POST['email']),
-                'telefono' => sanitize_text_field($_POST['telefono'])
-            ), array('id' => $seller_id));
+            $datos = array(
+                'nombre' => sanitize_text_field(wp_unslash($_POST['nombre'] ?? '')),
+                'email' => sanitize_email(wp_unslash($_POST['email'] ?? '')),
+                'telefono' => sanitize_text_field(wp_unslash($_POST['telefono'] ?? ''))
+            );
+            $edit_rifa_id = intval($_POST['rifa_id'] ?? 0);
+            if (isset($rifas_por_id[$edit_rifa_id])) {
+                $datos['rifa_id'] = $edit_rifa_id;
+            }
+            $wpdb->update($this->tbl_vendedores, $datos, array('id' => $seller_id));
             echo '<div class="updated"><p>Vendedor actualizado.</p></div>';
         }
 
         // Procesar eliminación
         if ($action === 'delete' && $seller_id > 0) {
-            check_admin_referer('dm_del_vendedor_' . $_GET['id']);
-            $wpdb->delete($this->tbl_vendedores, array('id' => intval($_GET['id'])));
-            echo '<div class="updated"><p>Vendedor eliminado.</p></div>';
+            check_admin_referer('dm_del_vendedor_' . $seller_id);
+            $con_reservas = intval($wpdb->get_var($wpdb->prepare(
+                "SELECT COUNT(*) FROM {$this->tbl_reservas} WHERE vendedor_id = %d",
+                $seller_id
+            )));
+            $con_arqueos = intval($wpdb->get_var($wpdb->prepare(
+                "SELECT COUNT(*) FROM {$this->tbl_arqueos} WHERE vendedor_id = %d",
+                $seller_id
+            )));
+            if ($con_reservas > 0 || $con_arqueos > 0) {
+                echo '<div class="notice notice-warning"><p>No se eliminó: el vendedor tiene ' . $con_reservas . ' reserva(s) y '
+                    . $con_arqueos . ' arqueo(s). Borrarlo dejaría esas ventas sin vendedor en los reportes de su rifa. '
+                    . 'Como cada rifa muestra solo su equipo, no aparecerá en las rifas nuevas.</p></div>';
+            } else {
+                $wpdb->delete($this->tbl_vendedores, array('id' => $seller_id));
+                echo '<div class="updated"><p>Vendedor eliminado.</p></div>';
+            }
         }
 
         // Procesar carga por lote (CSV)
         if (isset($_POST['dm_bulk_vendedores'])) {
             check_admin_referer('dm_bulk_vendedor_nonce');
-            if (!empty($_FILES['bulk_file']['tmp_name'])) {
+            $import_rifa_id = intval($_POST['rifa_id'] ?? 0);
+            if (!isset($rifas_por_id[$import_rifa_id])) {
+                echo '<div class="error"><p>Selecciona la rifa antes de importar vendedores.</p></div>';
+            } elseif (!empty($_FILES['bulk_file']['tmp_name'])) {
                 $handle = fopen($_FILES['bulk_file']['tmp_name'], "r");
                 $headers = fgetcsv($handle, 1000, ","); // Saltar cabecera
                 $count = 0;
@@ -1368,7 +1529,11 @@ class DM_Rifa_Unificado
                         $email = count($data) > 2 ? sanitize_email($data[1]) : '';
                         $telefono = count($data) > 2 ? sanitize_text_field($data[2]) : sanitize_text_field($data[1]);
 
+                        if ($nombre === '') {
+                            continue;
+                        }
                         $wpdb->insert($this->tbl_vendedores, array(
+                            'rifa_id' => $import_rifa_id,
                             'nombre' => $nombre,
                             'email' => $email,
                             'telefono' => $telefono
@@ -1377,7 +1542,7 @@ class DM_Rifa_Unificado
                     }
                 }
                 fclose($handle);
-                echo '<div class="updated"><p>' . intval($count) . ' vendedores importados con éxito.</p></div>';
+                echo '<div class="updated"><p>' . intval($count) . ' vendedores importados a la rifa ' . esc_html($rifas_por_id[$import_rifa_id]->nombre) . '.</p></div>';
             }
         }
 
@@ -1388,12 +1553,13 @@ class DM_Rifa_Unificado
             $monto = intval($_POST['monto']);
             $obs = sanitize_textarea_field($_POST['observaciones'] ?? '');
 
-            // Determinar rifa_id: usar la que viene del POST o la primera activa como fallback
+            // Rifa del arqueo: la que viene del formulario o, si no, la del vendedor
             $r_id = intval($_POST['rifa_id'] ?? 0);
             if ($r_id <= 0) {
-                $r_id = intval($wpdb->get_var(
-                    "SELECT id FROM {$this->tbl_rifas} WHERE activo = 1 ORDER BY id DESC LIMIT 1"
-                ));
+                $r_id = intval($wpdb->get_var($wpdb->prepare(
+                    "SELECT rifa_id FROM {$this->tbl_vendedores} WHERE id = %d",
+                    $v_id
+                )));
             }
 
             $insert_data = array(
@@ -1464,12 +1630,13 @@ class DM_Rifa_Unificado
             } elseif (empty(trim($obs))) {
                 echo '<div class="error"><p>El motivo de la devolución es obligatorio.</p></div>';
             } else {
-                // Determinar rifa_id activa como en el arqueo normal
+                // Rifa de la devolución: la del formulario o, si no, la del vendedor
                 $r_id = intval($_POST['rifa_id'] ?? 0);
                 if ($r_id <= 0) {
-                    $r_id = intval($wpdb->get_var(
-                        "SELECT id FROM {$this->tbl_rifas} WHERE activo = 1 ORDER BY id DESC LIMIT 1"
-                    ));
+                    $r_id = intval($wpdb->get_var($wpdb->prepare(
+                        "SELECT rifa_id FROM {$this->tbl_vendedores} WHERE id = %d",
+                        $v_id
+                    )));
                 }
 
                 // Guardar como monto NEGATIVO — esto es la devolución
@@ -1519,7 +1686,7 @@ class DM_Rifa_Unificado
             ?>
             <div class="wrap">
                 <h1>Editar Vendedor: <?php echo esc_html($vendedor->nombre); ?></h1>
-                <p><a href="?page=dm-rifa-vendedores" class="button">Volver al listado</a></p>
+                <p><a href="<?php echo esc_url(admin_url('admin.php?page=dm-rifa-vendedores' . ($vendedor->rifa_id ? '&rifa_id=' . intval($vendedor->rifa_id) : ''))); ?>" class="button">Volver al listado</a></p>
 
                 <div class="card" style="max-width: 500px; margin-top: 20px;">
                     <form method="post">
@@ -1540,6 +1707,22 @@ class DM_Rifa_Unificado
                                 <th>Teléfono/WhatsApp</th>
                                 <td><input type="text" name="telefono" value="<?php echo esc_attr($vendedor->telefono); ?>" required
                                         class="regular-text"></td>
+                            </tr>
+                            <tr>
+                                <th>Rifa</th>
+                                <td>
+                                    <select name="rifa_id" required>
+                                        <?php if (empty($vendedor->rifa_id)): ?>
+                                            <option value="">(Sin rifa — elegir)</option>
+                                        <?php endif; ?>
+                                        <?php foreach ($rifas_all as $r): ?>
+                                            <option value="<?php echo intval($r->id); ?>" <?php selected(intval($vendedor->rifa_id), intval($r->id)); ?>>
+                                                <?php echo esc_html($r->nombre . ($r->activo ? '' : ' (cerrada)')); ?>
+                                            </option>
+                                        <?php endforeach; ?>
+                                    </select>
+                                    <p class="description">Cada rifa tiene su propio equipo de vendedores.</p>
+                                </td>
                             </tr>
                         </table>
                         <p>
@@ -1564,6 +1747,12 @@ class DM_Rifa_Unificado
 
             $rifas = $wpdb->get_results("SELECT id, nombre FROM {$this->tbl_rifas} ORDER BY id DESC");
             $rifa_id = intval($_GET['rifa_id'] ?? 0);
+            $rifa_vendedor = intval($vendedor->rifa_id ?? 0);
+            if ($rifa_vendedor > 0) {
+                // El vendedor pertenece a una sola rifa: el reporte es siempre de esa rifa
+                $rifa_id = $rifa_vendedor;
+                $rifas = array_values(array_filter($rifas, fn($r) => intval($r->id) === $rifa_vendedor));
+            }
 
             $where_stats = "WHERE r.vendedor_id = %d";
             $where_simple = "WHERE vendedor_id = %d";
@@ -1644,7 +1833,7 @@ class DM_Rifa_Unificado
                 <h1>Reporte Detallado: <?php echo esc_html($vendedor->nombre); ?></h1>
                 <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
                     <div style="display: flex; gap: 10px;">
-                        <a href="?page=dm-rifa-vendedores" class="button">← Volver al listado</a>
+                        <a href="<?php echo esc_url(admin_url('admin.php?page=dm-rifa-vendedores' . ($rifa_id > 0 ? '&rifa_id=' . $rifa_id : ''))); ?>" class="button">← Volver al listado</a>
                         <a href="?page=dm-rifa-vendedores&action=edit&id=<?php echo $seller_id; ?>" class="button button-primary">✏️
                             Editar Datos del Vendedor</a>
                         <?php
@@ -1656,6 +1845,9 @@ class DM_Rifa_Unificado
                         <a href="<?php echo esc_url($export_url); ?>" class="button"
                             style="background: #00a32a; color: white; border-color: #00a32a;">📥 Descargar Reporte CSV</a>
                     </div>
+                    <?php if ($rifa_vendedor > 0 && !empty($rifas)): ?>
+                        <div style="font-size: 14px;">🎟️ Rifa: <strong><?php echo esc_html($rifas[0]->nombre); ?></strong></div>
+                    <?php else: ?>
                     <form method="get" action="" style="display: flex; align-items: center; gap: 10px;">
                         <input type="hidden" name="page" value="dm-rifa-vendedores">
                         <input type="hidden" name="action" value="report">
@@ -1670,6 +1862,7 @@ class DM_Rifa_Unificado
                             <?php endforeach; ?>
                         </select>
                     </form>
+                    <?php endif; ?>
                 </div>
 
                 <!-- Sección resumen con 4 métricas principales -->
@@ -1997,45 +2190,53 @@ class DM_Rifa_Unificado
             return;
         }
 
-        // 1. Obtener vendedores básicos
-        $query = "SELECT * FROM {$this->tbl_vendedores} ORDER BY nombre ASC";
-        $vendedores = $wpdb->get_results($query);
+        // ---------- LISTADO: vendedores de la rifa de trabajo ----------
+        if ($ver_sin_rifa) {
+            $vendedores = $wpdb->get_results("SELECT * FROM {$this->tbl_vendedores} v WHERE v.rifa_id IS NULL ORDER BY v.nombre ASC");
+        } elseif ($rifa_actual_id > 0) {
+            $vendedores = $wpdb->get_results(
+                "SELECT * FROM {$this->tbl_vendedores} v WHERE " . $this->sql_vendedor_en_rifa('v', $rifa_actual_id) . " ORDER BY v.nombre ASC"
+            );
+        } else {
+            $vendedores = array();
+        }
+        $total_sin_rifa = intval($wpdb->get_var("SELECT COUNT(*) FROM {$this->tbl_vendedores} WHERE rifa_id IS NULL"));
 
         if ($vendedores) {
-            // 2. Obtener conteo de números vendidos/pagados por vendedor (desde reservas para coincidir con reportes)
+            // Los totales son siempre de la rifa de trabajo (en "sin rifa" se muestran todos sus movimientos)
+            $f_res = $rifa_actual_id > 0 ? $wpdb->prepare(" AND r.rifa_id = %d", $rifa_actual_id) : "";
+            $f_simple = $rifa_actual_id > 0 ? $wpdb->prepare(" AND rifa_id = %d", $rifa_actual_id) : "";
+
             $ventas_raw = $wpdb->get_results("
-                SELECT r.vendedor_id, COUNT(*) as total 
+                SELECT r.vendedor_id, COUNT(*) as total
                 FROM {$this->tbl_numeros} n
                 JOIN {$this->tbl_reservas} r ON n.reserva_id = r.id
-                WHERE n.estado = 'pagado' 
+                WHERE n.estado = 'pagado' $f_res
                 GROUP BY r.vendedor_id
             ", OBJECT_K);
 
-            // 2b. Obtener conteo de números reservados por vendedor
             $reservadas_raw = $wpdb->get_results("
-                SELECT r.vendedor_id, COUNT(*) as total 
+                SELECT r.vendedor_id, COUNT(*) as total
                 FROM {$this->tbl_numeros} n
                 JOIN {$this->tbl_reservas} r ON n.reserva_id = r.id
-                WHERE n.estado = 'reservado' 
+                WHERE n.estado = 'reservado' $f_res
                 GROUP BY r.vendedor_id
             ", OBJECT_K);
 
-            // 4. Obtener recaudación (reservas pagadas)
             $recaudado_raw = $wpdb->get_results("
-                SELECT vendedor_id, SUM(total) as total 
-                FROM {$this->tbl_reservas} 
-                WHERE status = 'pagado' 
+                SELECT vendedor_id, SUM(total) as total
+                FROM {$this->tbl_reservas}
+                WHERE status = 'pagado' $f_simple
                 GROUP BY vendedor_id
             ", OBJECT_K);
 
-            // 5. Obtener entregado (arqueos)
             $entregado_raw = $wpdb->get_results("
-                SELECT vendedor_id, SUM(monto) as total 
-                FROM {$this->tbl_arqueos} 
+                SELECT vendedor_id, SUM(monto) as total
+                FROM {$this->tbl_arqueos}
+                WHERE 1=1 $f_simple
                 GROUP BY vendedor_id
             ", OBJECT_K);
 
-            // 6. Mapear datos a los objetos de vendedor
             foreach ($vendedores as $v) {
                 $vid = $v->id;
                 $v->ventas = isset($ventas_raw[$vid]) ? intval($ventas_raw[$vid]->total) : 0;
@@ -2043,81 +2244,128 @@ class DM_Rifa_Unificado
                 $v->recaudado = isset($recaudado_raw[$vid]) ? floatval($recaudado_raw[$vid]->total) : 0;
                 $v->entregado = isset($entregado_raw[$vid]) ? floatval($entregado_raw[$vid]->total) : 0;
             }
+
+            // Orden de la tabla (nombre o vendidas)
+            if ($orderby === 'ventas') {
+                usort($vendedores, function ($a, $b) use ($order) {
+                    return ($order === 'DESC') ? ($b->ventas <=> $a->ventas) : ($a->ventas <=> $b->ventas);
+                });
+            } elseif ($orderby === 'nombre' && $order === 'DESC') {
+                $vendedores = array_reverse($vendedores);
+            }
         }
 
-        // Link de la rifa activa para la "Guía WA" (una sola consulta para todo el listado)
-        $rifa_info = $wpdb->get_row("SELECT url_rifa FROM {$this->tbl_rifas} WHERE activo = 1 ORDER BY id DESC LIMIT 1");
-        $site_url = ($rifa_info && $rifa_info->url_rifa) ? $rifa_info->url_rifa : home_url();
+        $base_list_url = admin_url('admin.php?page=dm-rifa-vendedores' . ($rifa_actual_id > 0 ? '&rifa_id=' . $rifa_actual_id : '&sin_rifa=1'));
         ?>
         <div class="wrap">
-            <h1>Gestión de Vendedores</h1>
+            <h1>Vendedores</h1>
 
-            <div style="display: flex; gap: 20px; flex-wrap: wrap; margin-top: 20px;">
-                <div class="card" style="flex: 1; min-width: 300px; margin: 0;">
-                    <h2>Añadir Nuevo Vendedor</h2>
-                    <form method="post">
-                        <?php wp_nonce_field('dm_vendedor_nonce'); ?>
-                        <table class="form-table">
-                            <tr>
-                                <th>Nombre</th>
-                                <td><input type="text" name="nombre" required class="regular-text"></td>
-                            </tr>
-                            <tr>
-                                <th>Email</th>
-                                <td><input type="email" name="email" class="regular-text"></td>
-                            </tr>
-                            <tr>
-                                <th>Teléfono/WhatsApp</th>
-                                <td><input type="text" name="telefono" required class="regular-text"></td>
-                            </tr>
-                        </table>
-                        <p><button type="submit" name="dm_crear_vendedor" class="button button-primary">Registrar
-                                Vendedor</button></p>
-                    </form>
+            <!-- Rifa de trabajo -->
+            <form method="get" action=""
+                style="background:#fff; padding:15px 20px; border:1px solid #ccd0d4; border-radius:6px; margin-top:15px; display:flex; gap:12px; align-items:center; flex-wrap:wrap;">
+                <input type="hidden" name="page" value="dm-rifa-vendedores">
+                <label for="dm-vend-rifa"><strong>Equipo de la rifa:</strong></label>
+                <select id="dm-vend-rifa" name="rifa_id" onchange="this.form.submit()" style="min-width:280px;">
+                    <?php foreach ((array) $rifas_all as $r): ?>
+                        <option value="<?php echo intval($r->id); ?>" <?php selected($rifa_actual_id, intval($r->id)); ?>>
+                            <?php echo esc_html($r->nombre . ($r->activo ? ' (activa)' : ' (cerrada)')); ?>
+                        </option>
+                    <?php endforeach; ?>
+                </select>
+                <?php if ($total_sin_rifa > 0): ?>
+                    <a class="button<?php echo $ver_sin_rifa ? ' button-primary' : ''; ?>"
+                        href="<?php echo esc_url(admin_url('admin.php?page=dm-rifa-vendedores&sin_rifa=1')); ?>">
+                        Sin rifa asignada (<?php echo $total_sin_rifa; ?>)
+                    </a>
+                <?php endif; ?>
+            </form>
+
+            <?php if (!$rifas_all): ?>
+                <div class="notice notice-info"><p>Primero crea una rifa en <a href="<?php echo esc_url(admin_url('admin.php?page=dm-rifa')); ?>">DM Rifas</a>.</p></div>
+            <?php elseif ($ver_sin_rifa): ?>
+                <div class="notice notice-warning"><p>Estos vendedores no pertenecen a ninguna rifa. Usa <strong>Editar</strong> para asignarles su rifa.</p></div>
+            <?php else: ?>
+                <div style="display: flex; gap: 20px; flex-wrap: wrap; margin-top: 20px;">
+                    <div class="card" style="flex: 1; min-width: 300px; margin: 0;">
+                        <h2>Añadir vendedor a <?php echo esc_html($rifa_actual->nombre); ?></h2>
+                        <form method="post">
+                            <?php wp_nonce_field('dm_vendedor_nonce'); ?>
+                            <input type="hidden" name="rifa_id" value="<?php echo intval($rifa_actual_id); ?>">
+                            <table class="form-table">
+                                <tr>
+                                    <th>Nombre</th>
+                                    <td><input type="text" name="nombre" required class="regular-text"></td>
+                                </tr>
+                                <tr>
+                                    <th>Email</th>
+                                    <td><input type="email" name="email" class="regular-text"></td>
+                                </tr>
+                                <tr>
+                                    <th>Teléfono/WhatsApp</th>
+                                    <td><input type="text" name="telefono" required class="regular-text"></td>
+                                </tr>
+                            </table>
+                            <p><button type="submit" name="dm_crear_vendedor" class="button button-primary">Registrar Vendedor</button></p>
+                        </form>
+                    </div>
+
+                    <div class="card" style="flex: 1; min-width: 300px; margin: 0;">
+                        <h2>Importar vendedores a <?php echo esc_html($rifa_actual->nombre); ?></h2>
+                        <p class="description">Sube un CSV (Nombre, Email, Teléfono). La primera fila se toma como encabezado.</p>
+                        <form method="post" enctype="multipart/form-data">
+                            <?php wp_nonce_field('dm_bulk_vendedor_nonce'); ?>
+                            <input type="hidden" name="rifa_id" value="<?php echo intval($rifa_actual_id); ?>">
+                            <input type="file" name="bulk_file" accept=".csv" required>
+                            <p><button type="submit" name="dm_bulk_vendedores" class="button">Importar por Lote</button></p>
+                        </form>
+                    </div>
                 </div>
+            <?php endif; ?>
 
-                <div class="card" style="flex: 1; min-width: 300px; margin: 0;">
-                    <h2>Importar Vendedores</h2>
-                    <p class="description">Sube un CSV (Nombre, Email, Teléfono).</p>
-                    <form method="post" enctype="multipart/form-data">
-                        <?php wp_nonce_field('dm_bulk_vendedor_nonce'); ?>
-                        <input type="file" name="bulk_file" accept=".csv" required>
-                        <p><button type="submit" name="dm_bulk_vendedores" class="button">Importar por Lote</button></p>
-                    </form>
-                </div>
-
-            </div>
-
-            <div
-                style="display: flex; justify-content: space-between; align-items: center; margin-top: 30px; margin-bottom: 10px;">
-                <h2 style="margin: 0;">Listado de Vendedores</h2>
-                <a href="<?php echo wp_nonce_url(admin_url('admin-post.php?action=dm_rifa_export_report'), 'dm_rifa_export_report'); ?>"
-                    class="button button-primary" style="background: #2e7d32; border-color: #2e7d32; font-weight: bold;"
-                    title="Descargar resumen general de todos los vendedores en CSV">
-                    📥 Exportar Reporte General CSV
-                </a>
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 30px; margin-bottom: 10px; gap: 10px; flex-wrap: wrap;">
+                <h2 style="margin: 0;">
+                    <?php echo $ver_sin_rifa ? 'Vendedores sin rifa' : 'Equipo de ' . esc_html($rifa_actual->nombre ?? ''); ?>
+                    <span style="color:#666; font-weight:normal;">(<?php echo count((array) $vendedores); ?>)</span>
+                </h2>
+                <?php if ($rifa_actual_id > 0): ?>
+                    <a href="<?php echo esc_url(wp_nonce_url(admin_url('admin-post.php?action=dm_rifa_export_report&rifa_id=' . $rifa_actual_id), 'dm_rifa_export_report')); ?>"
+                        class="button button-primary" style="background: #2e7d32; border-color: #2e7d32; font-weight: bold;"
+                        title="Descargar el resumen de los vendedores de esta rifa en CSV">
+                        📥 Exportar reporte de la rifa (CSV)
+                    </a>
+                <?php endif; ?>
             </div>
             <table class="widefat striped">
                 <thead>
                     <tr>
                         <th>ID</th>
-                        <th><a href="?page=dm-rifa-vendedores&orderby=nombre&order=<?php echo $next_order; ?>">Nombre</a></th>
+                        <th><a href="<?php echo esc_url($base_list_url . '&orderby=nombre&order=' . $next_order); ?>">Nombre</a></th>
                         <th>Email</th>
                         <th>Teléfono</th>
-                        <th><a href="?page=dm-rifa-vendedores&orderby=ventas&order=<?php echo $next_order; ?>">Vendidas</a></th>
+                        <th><a href="<?php echo esc_url($base_list_url . '&orderby=ventas&order=' . $next_order); ?>">Vendidas</a></th>
                         <th>Reservadas</th>
                         <th>Recaudado</th>
                         <th>Entregado</th>
-                        <th>Total</th>
+                        <th>Saldo</th>
                         <th>Acciones</th>
                     </tr>
                 </thead>
                 <tbody>
                     <?php if ($vendedores):
-                        foreach ($vendedores as $v): ?>
+                        foreach ($vendedores as $v):
+                            $rifa_v = $rifas_por_id[intval($v->rifa_id)] ?? null;
+                            $link_v = $rifa_v ? $this->link_vendedor($rifa_v, $v->id) : '';
+                            $saldo = $v->recaudado - $v->entregado;
+                            ?>
                             <tr>
                                 <td><?php echo intval($v->id); ?></td>
-                                <td><strong><?php echo esc_html($v->nombre); ?></strong></td>
+                                <td>
+                                    <strong><?php echo esc_html($v->nombre); ?></strong>
+                                    <?php if (!$ver_sin_rifa && intval($v->rifa_id) !== $rifa_actual_id): ?>
+                                        <br><small style="color:#996800;">Vendió en esta rifa; su equipo es
+                                            <?php echo esc_html($rifa_v->nombre ?? 'sin rifa'); ?></small>
+                                    <?php endif; ?>
+                                </td>
                                 <td><?php echo esc_html($v->email); ?></td>
                                 <td><?php echo esc_html($v->telefono); ?></td>
                                 <td><span class="badge"
@@ -2126,63 +2374,90 @@ class DM_Rifa_Unificado
                                 <td><span class="badge"
                                         style="background:#ed6c02; color:#fff; padding:2px 8px; border-radius:4px; font-weight: 600;"><?php echo intval($v->reservadas); ?></span>
                                 </td>
-                                <td style="font-weight:bold; color:#2e7d32;">$<?php echo number_format($v->recaudado, 0, ',', '.'); ?>
-                                </td>
-                                <td style="font-weight:bold; color:#d32f2f;">$<?php echo number_format($v->entregado, 0, ',', '.'); ?>
-                                </td>
-                                <td
-                                    style="font-weight:bold; color:<?php echo ($v->recaudado - $v->entregado) > 0 ? '#f9a825' : '#2e7d32'; ?>;">
-                                    $<?php echo number_format($v->recaudado - $v->entregado, 0, ',', '.'); ?></td>
+                                <td style="font-weight:bold; color:#2e7d32;">$<?php echo number_format($v->recaudado, 0, ',', '.'); ?></td>
+                                <td style="font-weight:bold; color:#d32f2f;">$<?php echo number_format($v->entregado, 0, ',', '.'); ?></td>
+                                <td style="font-weight:bold; color:<?php echo $saldo > 0 ? '#f9a825' : '#2e7d32'; ?>;">
+                                    $<?php echo number_format($saldo, 0, ',', '.'); ?></td>
                                 <td>
                                     <div style="display: flex; gap: 5px; flex-wrap: wrap;">
-                                        <a href="<?php echo admin_url('admin.php?page=dm-rifa-vendedores&action=edit&id=' . $v->id); ?>"
+                                        <a href="<?php echo esc_url(admin_url('admin.php?page=dm-rifa-vendedores&action=edit&id=' . $v->id)); ?>"
                                             class="button button-small" title="Editar datos del vendedor">Editar</a>
 
-                                        <?php
-                                        // Mensaje de guía de venta
-                                        $msg_guia = "Hola *" . esc_attr($v->nombre) . "*, estas son las instrucciones para realizar las ventas de la rifa de manera correcta:
+                                        <?php if ($link_v):
+                                            $msg_guia = "Hola *" . $v->nombre . "*, estas son las instrucciones para vender la rifa *" . $rifa_v->nombre . "*:
+
+🔗 *Tu link personal:* " . $link_v . "
 
 🚀 *Paso a paso para vender:*
-1️⃣ Ingresa al link de la rifa: " . $site_url . "
+1️⃣ Comparte tu link o ábrelo con el cliente. Todo lo que se reserve desde ese link queda a tu nombre automáticamente.
 2️⃣ Deja que el cliente elija sus números favoritos en el mapa o ayúdalo a buscarlos.
 3️⃣ Completa los datos del comprador (Nombre y Teléfono son obligatorios).
-4️⃣ *MUY IMPORTANTE:* En el campo que dice *\"Vendedor responsable\"*, asegúrate de seleccionar tu nombre (*" . esc_attr($v->nombre) . "*) para que la venta cuente para ti.
-5️⃣ Haz clic en el botón de *\"Reservar\"*.
+4️⃣ Haz clic en *\"Continuar\"* para reservar.
 
 💰 *Reporte de pagos:*
-Una vez hecha la reserva en la web, para que yo pueda emitir las boletas oficiales, debes enviarme lo siguiente:
-* Si es por *Transferencia*: Pídele el comprobante al cliente y reenvíamelo de inmediato.
-* Si es en *Efectivo*: Avísame apenas recibas el dinero.
+Una vez hecha la reserva, para que yo pueda emitir las boletas oficiales, envíame:
+* Si es por *Transferencia*: el comprobante del cliente.
+* Si es en *Efectivo*: avísame apenas recibas el dinero.
 
-Apenas me confirmes el pago, yo activaré los números en el sistema y se generarán las boletas digitales para el cliente. 
+Apenas confirme el pago, activo los números y se genera la boleta digital para el cliente.
 
 ¡Muchos éxitos con las ventas! 🚀";
+                                            $wa_url_guia = "https://api.whatsapp.com/send?phone=" . preg_replace('/\D/', '', $v->telefono) . "&text=" . rawurlencode($msg_guia);
+                                            ?>
+                                            <button type="button" class="button button-small dm-copy-link"
+                                                data-link="<?php echo esc_attr($link_v); ?>" title="<?php echo esc_attr($link_v); ?>">🔗 Link</button>
+                                            <a href="<?php echo esc_url($wa_url_guia); ?>" target="_blank" rel="noopener" class="button button-small"
+                                                style="background:#25D366; color:#fff; border-color:#25D366;"
+                                                title="Enviar guía y link personal por WhatsApp">Guía WA</a>
+                                        <?php endif; ?>
 
-                                        $wa_url_guia = "https://api.whatsapp.com/send?phone=" . preg_replace('/\D/', '', $v->telefono) . "&text=" . urlencode($msg_guia);
-                                        ?>
-
-                                        <a href="<?php echo esc_url($wa_url_guia); ?>" target="_blank" class="button button-small"
-                                            style="background:#25D366; color:#fff; border-color:#25D366;"
-                                            title="Enviar guía paso a paso al vendedor">Guía WA</a>
-
-                                        <a href="<?php echo admin_url('admin.php?page=dm-rifa-vendedores&action=report&id=' . $v->id); ?>"
+                                        <a href="<?php echo esc_url(admin_url('admin.php?page=dm-rifa-vendedores&action=report&id=' . $v->id)); ?>"
                                             class="button button-small" style="background: #673ab7; color: #fff; border-color: #673ab7;"
                                             title="Ver Reporte Detallado">Reporte</a>
 
-                                        <a href="<?php echo wp_nonce_url(admin_url('admin.php?page=dm-rifa-vendedores&action=delete&id=' . $v->id), 'dm_del_vendedor_' . $v->id); ?>"
+                                        <a href="<?php echo esc_url(wp_nonce_url(admin_url('admin.php?page=dm-rifa-vendedores&action=delete&id=' . $v->id . ($rifa_actual_id > 0 ? '&rifa_id=' . $rifa_actual_id : '&sin_rifa=1')), 'dm_del_vendedor_' . $v->id)); ?>"
                                             class="button button-link-delete button-small"
-                                            onclick="return confirm('¿Eliminar vendedor?')" title="Eliminar vendedor">X</a>
+                                            onclick="return confirm('¿Eliminar vendedor? Solo se puede si no tiene reservas ni arqueos.')" title="Eliminar vendedor">X</a>
                                     </div>
                                 </td>
                             </tr>
                         <?php endforeach; else: ?>
                         <tr>
-                            <td colspan="10">No hay vendedores registrados.</td>
+                            <td colspan="10"><?php echo $ver_sin_rifa ? 'No hay vendedores sin rifa.' : 'Esta rifa aún no tiene vendedores.'; ?></td>
                         </tr>
                     <?php endif; ?>
                 </tbody>
             </table>
         </div>
+        <script>
+            (function () {
+                function copiar(texto, boton) {
+                    var hecho = function () {
+                        var original = boton.textContent;
+                        boton.textContent = '✔ Copiado';
+                        setTimeout(function () { boton.textContent = original; }, 1500);
+                    };
+                    if (navigator.clipboard && window.isSecureContext) {
+                        navigator.clipboard.writeText(texto).then(hecho);
+                        return;
+                    }
+                    var campo = document.createElement('textarea');
+                    campo.value = texto;
+                    campo.setAttribute('readonly', '');
+                    campo.style.position = 'absolute';
+                    campo.style.left = '-9999px';
+                    document.body.appendChild(campo);
+                    campo.select();
+                    try { document.execCommand('copy'); hecho(); } catch (e) { }
+                    document.body.removeChild(campo);
+                }
+                document.querySelectorAll('.dm-copy-link').forEach(function (boton) {
+                    boton.addEventListener('click', function () {
+                        copiar(boton.getAttribute('data-link'), boton);
+                    });
+                });
+            })();
+        </script>
         <?php
     }
     public function page_compradores()
@@ -2552,7 +2827,13 @@ Apenas me confirmes el pago, yo activaré los números en el sistema y se genera
             </p>
 
             <?php
-            $vendedores = $wpdb->get_results("SELECT id, nombre FROM {$this->tbl_vendedores} ORDER BY nombre ASC");
+            // Vendedores de esta rifa (más el ya asignado, por si es de otra)
+            $vendedores = $wpdb->get_results(
+                "SELECT v.id, v.nombre FROM {$this->tbl_vendedores} v WHERE "
+                . $this->sql_vendedor_en_rifa('v', $rifa_id)
+                . $wpdb->prepare(" OR v.id = %d", intval($reserva->vendedor_id))
+                . " ORDER BY v.nombre ASC"
+            );
             ?>
 
             <form method="post" action="<?php echo esc_url(admin_url('admin-post.php')); ?>" enctype="multipart/form-data"
@@ -2982,121 +3263,135 @@ Apenas me confirmes el pago, yo activaré los números en el sistema y se genera
         check_admin_referer('dm_rifa_export_report');
         global $wpdb;
 
+        // Cada rifa es independiente: el reporte siempre es de una rifa
+        $rifa_id = intval($_GET['rifa_id'] ?? 0);
+        $rifa = $rifa_id > 0 ? $this->fetch_rifa($rifa_id) : null;
+        if (!$rifa) {
+            wp_die('Selecciona una rifa para exportar su reporte de vendedores.');
+        }
+
+        $vendedores = $wpdb->get_results(
+            "SELECT v.id, v.nombre, v.telefono FROM {$this->tbl_vendedores} v WHERE "
+            . $this->sql_vendedor_en_rifa('v', $rifa_id) . " ORDER BY v.nombre ASC"
+        );
+
+        $ventas_raw = $wpdb->get_results($wpdb->prepare("
+            SELECT r.vendedor_id, COUNT(*) as total
+            FROM {$this->tbl_numeros} n
+            JOIN {$this->tbl_reservas} r ON n.reserva_id = r.id
+            WHERE n.estado = 'pagado' AND r.rifa_id = %d
+            GROUP BY r.vendedor_id
+        ", $rifa_id), OBJECT_K);
+
+        $reservadas_raw = $wpdb->get_results($wpdb->prepare("
+            SELECT r.vendedor_id, COUNT(*) as total
+            FROM {$this->tbl_numeros} n
+            JOIN {$this->tbl_reservas} r ON n.reserva_id = r.id
+            WHERE n.estado = 'reservado' AND r.rifa_id = %d
+            GROUP BY r.vendedor_id
+        ", $rifa_id), OBJECT_K);
+
+        $recaudado_raw = $wpdb->get_results($wpdb->prepare("
+            SELECT vendedor_id, SUM(total) as total
+            FROM {$this->tbl_reservas}
+            WHERE status = 'pagado' AND rifa_id = %d
+            GROUP BY vendedor_id
+        ", $rifa_id), OBJECT_K);
+
+        $efectivo_raw = $wpdb->get_results($wpdb->prepare("
+            SELECT vendedor_id, SUM(total) as total
+            FROM {$this->tbl_reservas}
+            WHERE status = 'pagado' AND forma_pago = 'efectivo' AND rifa_id = %d
+            GROUP BY vendedor_id
+        ", $rifa_id), OBJECT_K);
+
+        $monto_reservas_raw = $wpdb->get_results($wpdb->prepare("
+            SELECT vendedor_id, SUM(total) as total
+            FROM {$this->tbl_reservas}
+            WHERE status = 'reservado' AND rifa_id = %d
+            GROUP BY vendedor_id
+        ", $rifa_id), OBJECT_K);
+
+        $entregado_raw = $wpdb->get_results($wpdb->prepare("
+            SELECT vendedor_id, SUM(monto) as total
+            FROM {$this->tbl_arqueos}
+            WHERE rifa_id = %d
+            GROUP BY vendedor_id
+        ", $rifa_id), OBJECT_K);
+
+        $filename = 'vendedores_' . sanitize_file_name($rifa->nombre) . '_' . date('Y-m-d') . '.csv';
         header('Content-Type: text/csv; charset=utf-8');
-        header('Content-Disposition: attachment; filename=reporte_general_vendedores.csv');
+        header('Content-Disposition: attachment; filename=' . $filename);
 
         $output = fopen('php://output', 'w');
+        fprintf($output, chr(0xEF) . chr(0xBB) . chr(0xBF)); // BOM para Excel
 
-        // BOM para compatibilidad con Excel
-        fprintf($output, chr(0xEF) . chr(0xBB) . chr(0xBF));
-
-        // Encabezados
+        fputcsv($output, ['REPORTE DE VENDEDORES - ' . $rifa->nombre]);
+        fputcsv($output, []);
         fputcsv($output, [
             'Vendedor',
+            'Teléfono',
             'Boletas Vendidas',
             'Boletas Reservadas',
             'Total Recaudado',
+            'Recaudo Efectivo',
+            'Recaudo Transferencia',
             'Monto en Reservas',
             'Dinero Entregado (Arqueos)',
             'Saldo Pendiente'
         ]);
 
-        // 1. Obtener todos los vendedores
-        $vendedores = $wpdb->get_results("SELECT id, nombre FROM {$this->tbl_vendedores} ORDER BY nombre ASC");
+        $t = array('vendidas' => 0, 'reservadas' => 0, 'recaudado' => 0, 'efectivo' => 0, 'reservas' => 0, 'entregado' => 0);
+        $money = function ($n) {
+            return '$' . number_format($n, 0, ',', '.');
+        };
 
-        if (!$vendedores) {
-            fclose($output);
-            exit;
-        }
-
-        // 2. Obtener conteos globales con queries simples (igual que page_vendedores)
-        $ventas_raw = $wpdb->get_results("
-            SELECT r.vendedor_id, COUNT(*) as total
-            FROM {$this->tbl_numeros} n
-            JOIN {$this->tbl_reservas} r ON n.reserva_id = r.id
-            WHERE n.estado = 'pagado'
-            GROUP BY r.vendedor_id
-        ", OBJECT_K);
-
-        $reservadas_raw = $wpdb->get_results("
-            SELECT r.vendedor_id, COUNT(*) as total
-            FROM {$this->tbl_numeros} n
-            JOIN {$this->tbl_reservas} r ON n.reserva_id = r.id
-            WHERE n.estado = 'reservado'
-            GROUP BY r.vendedor_id
-        ", OBJECT_K);
-
-        $recaudado_raw = $wpdb->get_results("
-            SELECT vendedor_id, SUM(total) as total
-            FROM {$this->tbl_reservas}
-            WHERE status = 'pagado'
-            GROUP BY vendedor_id
-        ", OBJECT_K);
-
-        $monto_reservas_raw = $wpdb->get_results("
-            SELECT vendedor_id, SUM(total) as total
-            FROM {$this->tbl_reservas}
-            WHERE status = 'reservado'
-            GROUP BY vendedor_id
-        ", OBJECT_K);
-
-        $entregado_raw = $wpdb->get_results("
-            SELECT vendedor_id, SUM(monto) as total
-            FROM {$this->tbl_arqueos}
-            GROUP BY vendedor_id
-        ", OBJECT_K);
-
-        // 3. Escribir filas
-        foreach ($vendedores as $v) {
+        foreach ((array) $vendedores as $v) {
             $vid = $v->id;
             $vendidas = isset($ventas_raw[$vid]) ? intval($ventas_raw[$vid]->total) : 0;
             $reservadas = isset($reservadas_raw[$vid]) ? intval($reservadas_raw[$vid]->total) : 0;
             $recaudado = isset($recaudado_raw[$vid]) ? floatval($recaudado_raw[$vid]->total) : 0;
+            $efectivo = isset($efectivo_raw[$vid]) ? floatval($efectivo_raw[$vid]->total) : 0;
             $monto_reservas = isset($monto_reservas_raw[$vid]) ? floatval($monto_reservas_raw[$vid]->total) : 0;
             $entregado = isset($entregado_raw[$vid]) ? floatval($entregado_raw[$vid]->total) : 0;
-            $saldo_pendiente = $recaudado - $entregado;
-
-            // Omitir vendedores sin ninguna actividad
-            if ($vendidas === 0 && $reservadas === 0 && $recaudado == 0)
-                continue;
 
             fputcsv($output, [
                 $v->nombre,
+                $v->telefono,
                 $vendidas,
                 $reservadas,
-                '$' . number_format($recaudado, 0, ',', '.'),
-                '$' . number_format($monto_reservas, 0, ',', '.'),
-                '$' . number_format($entregado, 0, ',', '.'),
-                '$' . number_format($saldo_pendiente, 0, ',', '.')
+                $money($recaudado),
+                $money($efectivo),
+                $money($recaudado - $efectivo),
+                $money($monto_reservas),
+                $money($entregado),
+                $money($recaudado - $entregado)
             ]);
+
+            $t['vendidas'] += $vendidas;
+            $t['reservadas'] += $reservadas;
+            $t['recaudado'] += $recaudado;
+            $t['efectivo'] += $efectivo;
+            $t['reservas'] += $monto_reservas;
+            $t['entregado'] += $entregado;
         }
 
-        // Fila de TOTALES — iterar de nuevo para no guardar arrays grandes
-        $t_vendidas = $t_reservadas = $t_recaudado = $t_reservas = $t_entregado = 0;
-        foreach ($vendedores as $v) {
-            $vid = $v->id;
-            $t_vendidas += isset($ventas_raw[$vid]) ? intval($ventas_raw[$vid]->total) : 0;
-            $t_reservadas += isset($reservadas_raw[$vid]) ? intval($reservadas_raw[$vid]->total) : 0;
-            $t_recaudado += isset($recaudado_raw[$vid]) ? floatval($recaudado_raw[$vid]->total) : 0;
-            $t_reservas += isset($monto_reservas_raw[$vid]) ? floatval($monto_reservas_raw[$vid]->total) : 0;
-            $t_entregado += isset($entregado_raw[$vid]) ? floatval($entregado_raw[$vid]->total) : 0;
-        }
-
-        // Separador y fila de totales
         fputcsv($output, []);
         fputcsv($output, [
-            'TOTAL GENERAL',
-            $t_vendidas,
-            $t_reservadas,
-            '$' . number_format($t_recaudado, 0, ',', '.'),
-            '$' . number_format($t_reservas, 0, ',', '.'),
-            '$' . number_format($t_entregado, 0, ',', '.'),
-            '$' . number_format($t_recaudado - $t_entregado, 0, ',', '.')
+            'TOTAL RIFA',
+            '',
+            $t['vendidas'],
+            $t['reservadas'],
+            $money($t['recaudado']),
+            $money($t['efectivo']),
+            $money($t['recaudado'] - $t['efectivo']),
+            $money($t['reservas']),
+            $money($t['entregado']),
+            $money($t['recaudado'] - $t['entregado'])
         ]);
 
-        // Marca de tiempo de generación
         fputcsv($output, []);
-        fputcsv($output, ['Generado el', date('d/m/Y H:i:s')]);
+        fputcsv($output, ['Generado el', current_time('d/m/Y H:i')]);
 
         fclose($output);
         exit;
@@ -3120,6 +3415,9 @@ Apenas me confirmes el pago, yo activaré los números en el sistema y se genera
         $vendedor = $wpdb->get_row($wpdb->prepare("SELECT * FROM {$this->tbl_vendedores} WHERE id = %d", $vendedor_id));
         if (!$vendedor) {
             wp_die('Vendedor no encontrado');
+        }
+        if (intval($vendedor->rifa_id ?? 0) > 0) {
+            $rifa_id = intval($vendedor->rifa_id); // el reporte es de la rifa del vendedor
         }
 
         // Preparar filtros
@@ -3219,159 +3517,6 @@ Apenas me confirmes el pago, yo activaré los números en el sistema y se genera
     }
 
 
-    public function page_reportes()
-    {
-        if (!current_user_can('manage_options')) {
-            return;
-        }
-        global $wpdb;
-
-        $rifa_id = $this->get_context_rifa_id();
-        $fecha_inicio = sanitize_text_field($_GET['fecha_inicio'] ?? '');
-        $fecha_fin = sanitize_text_field($_GET['fecha_fin'] ?? '');
-
-        $rifas = $wpdb->get_results("SELECT id, nombre FROM {$this->tbl_rifas} ORDER BY id DESC");
-
-        // Preparar filtros
-        $where_rifa_simple = $rifa_id ? $wpdb->prepare("AND rifa_id = %d", $rifa_id) : "";
-        $where_rifa_join = $rifa_id ? $wpdb->prepare("AND r.rifa_id = %d", $rifa_id) : "";
-        $where_dates_simple = "";
-        $where_dates_join = "";
-
-        if ($fecha_inicio) {
-            $where_dates_simple .= $wpdb->prepare(" AND created_at >= %s", $fecha_inicio . ' 00:00:00');
-            $where_dates_join .= $wpdb->prepare(" AND r.created_at >= %s", $fecha_inicio . ' 00:00:00');
-        }
-        if ($fecha_fin) {
-            $where_dates_simple .= $wpdb->prepare(" AND created_at <= %s", $fecha_fin . ' 23:59:59');
-            $where_dates_join .= $wpdb->prepare(" AND r.created_at <= %s", $fecha_fin . ' 23:59:59');
-        }
-
-        $query = "
-            SELECT 
-                v.id, 
-                v.nombre,
-                (SELECT COUNT(*) FROM {$this->tbl_numeros} n 
-                 JOIN {$this->tbl_reservas} r ON n.reserva_id = r.id
-                 WHERE r.vendedor_id = v.id AND n.estado = 'pagado' $where_rifa_join $where_dates_join) as vendidas,
-                (SELECT COUNT(*) FROM {$this->tbl_numeros} n 
-                 JOIN {$this->tbl_reservas} r ON n.reserva_id = r.id
-                 WHERE r.vendedor_id = v.id AND n.estado = 'reservado' $where_rifa_join $where_dates_join) as reservadas,
-                (SELECT SUM(total) FROM {$this->tbl_reservas} 
-                 WHERE vendedor_id = v.id AND status = 'pagado' $where_rifa_simple $where_dates_simple) as total_recaudado,
-                (SELECT SUM(total) FROM {$this->tbl_reservas} 
-                 WHERE vendedor_id = v.id AND status = 'reservado' $where_rifa_simple $where_dates_simple) as monto_reservas,
-                (SELECT SUM(monto) FROM {$this->tbl_arqueos} 
-                 WHERE vendedor_id = v.id $where_rifa_simple $where_dates_simple) as dinero_entregado
-            FROM {$this->tbl_vendedores} v
-            GROUP BY v.id
-            ORDER BY vendidas DESC
-        ";
-
-        $vendedores = $wpdb->get_results($query);
-        $export_url = wp_nonce_url(admin_url('admin-post.php?action=dm_rifa_export_report&rifa_id=' . $rifa_id . '&fecha_inicio=' . $fecha_inicio . '&fecha_fin=' . $fecha_fin), 'dm_rifa_export_report');
-
-        ?>
-        <div class="wrap">
-            <h1>Reporte de Ventas por Vendedor</h1>
-            <p>Resumen detallado del rendimiento y recaudación de cada vendedor.</p>
-
-            <form method="get"
-                style="margin:20px 0; background: #fff; padding: 20px; border: 1px solid #ccd0d4; border-radius: 4px; display: flex; align-items: flex-end; gap: 15px; flex-wrap: wrap;">
-                <input type="hidden" name="page" value="dm-rifa-reportes">
-
-                <div>
-                    <label style="display: block; margin-bottom: 5px;"><strong>Seleccionar Rifa:</strong></label>
-                    <select name="rifa_id" style="min-width: 200px;">
-                        <option value="0">-- Todas las rifas --</option>
-                        <?php foreach ($rifas as $r): ?>
-                            <option value="<?php echo $r->id; ?>" <?php selected($rifa_id, $r->id); ?>>
-                                <?php echo esc_html($r->nombre); ?>
-                            </option>
-                        <?php endforeach; ?>
-                    </select>
-                </div>
-
-                <div>
-                    <label style="display: block; margin-bottom: 5px;"><strong>Desde:</strong></label>
-                    <input type="date" name="fecha_inicio" value="<?php echo esc_attr($fecha_inicio); ?>">
-                </div>
-
-                <div>
-                    <label style="display: block; margin-bottom: 5px;"><strong>Hasta:</strong></label>
-                    <input type="date" name="fecha_fin" value="<?php echo esc_attr($fecha_fin); ?>">
-                </div>
-
-                <div style="flex-grow: 1;">
-                    <button type="submit" class="button button-primary" style="height: 30px;">Filtrar Reporte</button>
-                    <a href="admin.php?page=dm-rifa-reportes" class="button button-secondary" style="height: 30px;">Limpiar</a>
-                </div>
-
-                <div>
-                    <a href="<?php echo $export_url; ?>" class="button button-primary"
-                        style="background: #2271b1; border-color: #2271b1; height: 30px;">Exportar CSV</a>
-                </div>
-            </form>
-
-            <table class="widefat striped">
-                <thead>
-                    <tr>
-                        <th>Vendedor</th>
-                        <th style="text-align: right;">Boletas Vendidas</th>
-                            <th style="text-align: right;">Recaudo Efectivo</th>
-                            <th style="text-align: right;">Recaudo Transferencia</th>
-                        <th style="text-align: right;">Total Recaudado</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <?php
-                    $total_global_boletas = 0;
-                    $total_global_efectivo = 0;
-                    $total_global_transferencia = 0;
-
-                    if ($vendedores):
-                        foreach ($vendedores as $v):
-                            $row_total = ($v->efectivo ?: 0) + ($v->transferencia ?: 0);
-                            $total_global_boletas += $v->boletas;
-                            $total_global_efectivo += ($v->efectivo ?: 0);
-                            $total_global_transferencia += ($v->transferencia ?: 0);
-
-                            if ($v->boletas == 0 && $row_total == 0)
-                                continue; // No mostrar si no tiene nada
-                            ?>
-                            <tr>
-                                <td><strong><?php echo esc_html($v->nombre); ?></strong></td>
-                                <td style="text-align: right;"><?php echo intval($v->boletas); ?></td>
-                                    <td style="text-align: right;">$<?php echo number_format($v->efectivo ?: 0, 0, ',', '.'); ?>
-                                    </td>
-                                    <td style="text-align: right;">
-                                        $<?php echo number_format($v->transferencia ?: 0, 0, ',', '.'); ?></td>
-                                <td style="text-align: right; font-weight: bold; background: #f9f9f9;">
-                                    $<?php echo number_format($row_total, 0, ',', '.'); ?></td>
-                            </tr>
-                        <?php endforeach; ?>
-                        <tr style="background: #f0f0f1; font-weight: bold;">
-                            <td>TOTAL GENERAL</td>
-                            <td style="text-align: right;"><?php echo $total_global_boletas; ?></td>
-                                <td style="text-align: right;">$<?php echo number_format($total_global_efectivo, 0, ',', '.'); ?>
-                                </td>
-                                <td style="text-align: right;">
-                                    $<?php echo number_format($total_global_transferencia, 0, ',', '.'); ?></td>
-                            <td style="text-align: right;">
-                                $<?php echo number_format(($total_global_efectivo + $total_global_transferencia), 0, ',', '.'); ?>
-                            </td>
-                        </tr>
-                    <?php else: ?>
-                        <tr>
-                            <td colspan="5">No hay datos de ventas registrados.</td>
-                        </tr>
-                    <?php endif; ?>
-                </tbody>
-            </table>
-        </div>
-        <?php
-    }
-
     /* ---------------------- Shortcode: Selector ---------------------- */
     public function sc_rifa_selector($atts)
     {
@@ -3436,18 +3581,37 @@ Apenas me confirmes el pago, yo activaré los números en el sistema y se genera
             <div class="dm-form">
                 <h3>Datos del comprador</h3>
                 <?php
-                $vendedores = $wpdb->get_results("SELECT id, nombre FROM {$this->tbl_vendedores} ORDER BY nombre ASC");
-                if ($vendedores):
+                // Link personal del vendedor (?v=ID): la venta queda a su nombre automáticamente
+                $vendedor_link = null;
+                $v_param = intval($_GET['v'] ?? 0);
+                if ($v_param > 0 && $this->vendedor_es_de_rifa($v_param, $rifa_id)) {
+                    $vendedor_link = $wpdb->get_row($wpdb->prepare(
+                        "SELECT id, nombre FROM {$this->tbl_vendedores} WHERE id = %d",
+                        $v_param
+                    ));
+                }
+                if ($vendedor_link):
                     ?>
-                    <label>Vendedor responsable<br>
-                        <select class="dm-vendedor">
-                            <option value="">(Elegir vendedor)</option>
-                            <?php foreach ($vendedores as $v): ?>
-                                <option value="<?php echo intval($v->id); ?>"><?php echo esc_html($v->nombre); ?></option>
-                            <?php endforeach; ?>
-                        </select>
-                    </label>
-                <?php endif; ?>
+                    <input type="hidden" class="dm-vendedor" value="<?php echo intval($vendedor_link->id); ?>">
+                    <p class="dm-vendedor-fijo">Vendedor: <strong><?php echo esc_html($vendedor_link->nombre); ?></strong></p>
+                <?php else:
+                    // Solo el equipo de esta rifa
+                    $vendedores = $wpdb->get_results($wpdb->prepare(
+                        "SELECT id, nombre FROM {$this->tbl_vendedores} WHERE rifa_id = %d ORDER BY nombre ASC",
+                        $rifa_id
+                    ));
+                    if ($vendedores):
+                        ?>
+                        <label>Vendedor responsable<br>
+                            <select class="dm-vendedor">
+                                <option value="">(Elegir vendedor)</option>
+                                <?php foreach ($vendedores as $v): ?>
+                                    <option value="<?php echo intval($v->id); ?>"><?php echo esc_html($v->nombre); ?></option>
+                                <?php endforeach; ?>
+                            </select>
+                        </label>
+                    <?php endif;
+                endif; ?>
                 <label>Nombre<br><input type="text" class="dm-nombre"></label>
                 <label>Email (opcional)<br><input type="email" class="dm-email"></label>
                 <label>Teléfono<br><input type="tel" class="dm-telefono"></label>
@@ -3606,6 +3770,9 @@ Apenas me confirmes el pago, yo activaré los números en el sistema y se genera
         $tel = sanitize_text_field($_POST['telefono'] ?? '');
         $vendedor_id = intval($_POST['vendedor_id'] ?? 0);
         $forma_pago = sanitize_text_field($_POST['forma_pago'] ?? 'transferencia');
+        if (!in_array($forma_pago, array('transferencia', 'efectivo'), true)) {
+            $forma_pago = 'transferencia';
+        }
 
         if (!$rifa_id || empty($nlist) || !$nombre || !$tel) {
             wp_send_json_error(array('message' => 'Datos incompletos'));
@@ -3617,6 +3784,11 @@ Apenas me confirmes el pago, yo activaré los números en el sistema y se genera
 
         if (!$rifa->activo) {
             wp_send_json_error(array('message' => 'Esta rifa está temporalmente pausada.'));
+        }
+
+        // Solo se acepta un vendedor del equipo de esta rifa
+        if ($vendedor_id > 0 && !$this->vendedor_es_de_rifa($vendedor_id, $rifa_id)) {
+            $vendedor_id = 0;
         }
 
         // Normalizar números seleccionados
@@ -3670,6 +3842,10 @@ Apenas me confirmes el pago, yo activaré los números en el sistema y se genera
         $expires = date('Y-m-d H:i:s', time() + 24 * 3600);
         $token = function_exists('random_bytes') ? bin2hex(random_bytes(16)) : wp_generate_password(32, false);
 
+        // Reserva atómica: si otro comprador toma alguno de los números en este instante,
+        // no se crea nada y se informa cuáles se perdieron.
+        $wpdb->query('START TRANSACTION');
+
         // INSERTAR RESERVA
         $inserted = $wpdb->insert($this->tbl_reservas, array(
             'rifa_id' => $rifa_id,
@@ -3688,24 +3864,45 @@ Apenas me confirmes el pago, yo activaré los números en el sistema y se genera
         ));
 
         if (!$inserted) {
+            $wpdb->query('ROLLBACK');
             wp_send_json_error(array('message' => 'Error al crear la reserva en la base de datos.'));
         }
 
         $reserva_id = intval($wpdb->insert_id);
 
-        // ACTUALIZAR ESTADO DE LOS NÚMEROS
+        // ACTUALIZAR ESTADO DE LOS NÚMEROS (solo si siguen disponibles)
         $ids_to_update = array_values($found_ids);
         $place_ids = implode(',', array_fill(0, count($ids_to_update), '%d'));
         $updated_nums = $wpdb->query($wpdb->prepare(
-            "UPDATE {$this->tbl_numeros} SET estado = 'reservado', reserva_id = %d, updated_at = NOW() WHERE id IN ($place_ids)",
+            "UPDATE {$this->tbl_numeros} SET estado = 'reservado', reserva_id = %d, updated_at = NOW()
+             WHERE id IN ($place_ids) AND estado = 'disponible'",
             array_merge(array($reserva_id), $ids_to_update)
         ));
 
-        if ($updated_nums === false) {
-            error_log("DM RIFA ERROR: Falló actualización de números para Reserva $reserva_id");
-            // Intentar mitigar: si falló el update pero la reserva existe,
-            // al menos logueamos para que el admin sepa.
+        if ($updated_nums === false || intval($updated_nums) !== count($ids_to_update)) {
+            $wpdb->query('ROLLBACK');
+            // Compensación por si las tablas no soportan transacciones (MyISAM)
+            $wpdb->query($wpdb->prepare(
+                "UPDATE {$this->tbl_numeros} SET estado = 'disponible', reserva_id = NULL, updated_at = NOW()
+                 WHERE reserva_id = %d AND estado = 'reservado'",
+                $reserva_id
+            ));
+            $wpdb->delete($this->tbl_reservas, array('id' => $reserva_id));
+
+            if ($updated_nums === false) {
+                error_log("DM Rifa: falló la actualización de números para la reserva $reserva_id: " . $wpdb->last_error);
+                wp_send_json_error(array('message' => 'No se pudo completar la reserva. Intenta de nuevo.'));
+            }
+            $tomados = $wpdb->get_col($wpdb->prepare(
+                "SELECT numero FROM {$this->tbl_numeros} WHERE id IN ($place_ids) AND estado <> 'disponible' ORDER BY numero ASC",
+                $ids_to_update
+            ));
+            wp_send_json_error(array(
+                'message' => 'Otra persona acaba de reservar: ' . implode(', ', $tomados) . '. Quítalos de tu selección e intenta de nuevo.'
+            ));
         }
+
+        $wpdb->query('COMMIT');
 
         $confirm_url = '';
         if (intval($rifa->gracias_page_id) > 0) {

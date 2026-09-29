@@ -4,6 +4,8 @@
 
 Plugin propio de **DM Studio SAS** para operar rifas: venta online (selector de números + reserva + confirmación por WhatsApp con pago Nequi/transferencia o efectivo), vendedores que venden a través del selector web (el comprador elige "Vendedor responsable"), arqueos de caja e impresión de boletas.
 
+> **Modelo de negocio:** DM Studio vende la *administración* de rifas. Cada rifa es un negocio independiente con su propio equipo de vendedores (casi nunca se repiten entre rifas). Daniel opera todo como administrador. **Todos los consolidados y reportes son por rifa; no se necesita nada unificado entre rifas.**
+>
 > **Desde 2.0.0 no existe venta física** (asignar números a vendedores, reportar venta física, auto-asignar 10, estado `asignado`, modo de venta Mixto/Virtual). No volver a agregarla salvo pedido explícito.
 
 - **Estado:** en producción en dm-studio.com. Desarrollo activo.
@@ -80,13 +82,16 @@ En producción existe además la carpeta `Google_Sans_Flex/` (fuente para las bo
 | `dm_rifas` | Rifas | nombre, fecha, loteria, total_numeros, precio, wa_e164, gracias_page_id, boleta_id, url_rifa, meta_recaudo, activo. (`modo_venta` sigue en la tabla pero está **obsoleta** desde 2.0.0: no se lee ni se escribe) |
 | `dm_rifa_numeros` | Un registro por número | numero (`000`…), **estado** (`disponible` · `reservado` · `pagado`), reserva_id, vendedor_id (el de la reserva), updated_at |
 | `dm_rifa_reservas` | Compras/reservas | nombre, email, telefono, numeros_csv, precio_unit, total, **status** (`reservado` · `pagado` · `expirado`), token, vendedor_id, **forma_pago**, impreso, comprobante_url |
-| `dm_rifa_vendedores` | Vendedores | nombre, email, telefono |
+| `dm_rifa_vendedores` | Vendedores (equipo de una rifa) | **rifa_id**, nombre, email, telefono |
 | `dm_rifa_boletas` | Plantillas de boleta | nombre, background_id, ticket_config (JSON de posiciones y tamaños) |
 | `dm_rifa_arqueos` | Entregas de dinero de vendedores | vendedor_id, rifa_id, monto, fecha, observaciones |
 
 **Migraciones:** `on_activate()` crea las tablas con `dbDelta`. Como el despliegue es por FTP (no se reactiva el plugin), las columnas nuevas se agregan con `ensure_rifas_columns()`, `ensure_reservas_columns()`, `ensure_numeros_columns()` y `ensure_arqueos_table()` en `admin_init`. Toda columna nueva debe ir también ahí.
 
 **Migraciones de datos únicas:** se controlan con una opción de WordPress. `migrar_sin_venta_fisica()` (2.0.0, llamada desde `ensure_numeros_columns()`): números `asignado` sin reserva → `disponible`; con reserva → `pagado`. Resultado en la opción `dm_rifa_migracion_200` (fecha, liberados, pagados).
+`ensure_vendedores_columns()` (2.0.0): agrega `rifa_id` a vendedores y, una sola vez, asigna a cada vendedor la rifa donde tiene más reservas (si no tiene, la de su último arqueo); completa `rifa_id` vacío en arqueos. Resultado en `dm_rifa_migracion_200_vendedores` (con_rifa, sin_rifa, arqueos_completados).
+
+**Regla de pertenencia:** `sql_vendedor_en_rifa()` = vendedor del equipo de la rifa **o** con reservas en ella (para no perder ventas históricas en los reportes). El selector público y el link `?v=` solo aceptan el equipo (`vendedor_es_de_rifa()`).
 
 **Estados:** los estados `pago parcial` y `parcialmente liberado` de la v1.2.0 fueron eliminados (normalizados a `reservado` en feb-2026). Aún quedan referencias visuales en `page_compradores` (~línea 2867).
 
@@ -95,7 +100,7 @@ En producción existe además la carpeta `Google_Sans_Flex/` (fuente para las bo
 ## Funcionalidades
 
 **Front (shortcodes)**
-- `[rifa_selector id="X"]` — grilla de números, buscador, filtros, selección, formulario del comprador y reserva por AJAX (`dm_rifa_reservar`). Refresca estados con `dm_rifa_get_states`.
+- `[rifa_selector id="X"]` — grilla de números, buscador, filtros, selección, formulario del comprador y reserva por AJAX (`dm_rifa_reservar`). Refresca estados con `dm_rifa_get_states`. El desplegable de vendedores muestra solo el equipo de la rifa. **Link personal:** `url_rifa?v=ID` fija el vendedor y oculta el desplegable (`link_vendedor()`). La reserva es atómica (`UPDATE … WHERE estado='disponible'` en transacción).
 - `[rifa_confirm]` — confirmación por token (`?rifa=ID&t=TOKEN`) y botón de WhatsApp con el comprobante.
 
 **Admin — menú "DM Rifas"**
@@ -103,13 +108,12 @@ En producción existe además la carpeta `Google_Sans_Flex/` (fuente para las bo
 |---|---|---|
 | Rifas (crear, editar, activar) | `dm-rifa` | `page_rifas()` |
 | Reservas y Ventas | `dm-rifa-compradores` | `page_compradores()` |
-| Vendedores (alta, edición, importación por lote, guía por WhatsApp, reporte individual, arqueos y devoluciones) | `dm-rifa-vendedores` | `page_vendedores()` |
+| Vendedores por rifa: selector "Equipo de la rifa", alta/importación a esa rifa, edición (incluye cambiar rifa), link personal, guía por WhatsApp, reporte individual (siempre de su rifa), arqueos y devoluciones, vista "Sin rifa asignada" | `dm-rifa-vendedores` | `page_vendedores()` |
 | Dashboard | `dm-rifa-dashboard` | `page_dashboard()` |
 | Diseñador de Boletas | `dm-rifa-boletas` | `page_boletas()` |
-| Reportes (sin entrada en el menú) | — | `page_reportes()` |
 
 **Acciones (`admin_post_*` / AJAX)**
-`update_reserva`, `liberar_reserva`, `delete_reserva`, `export_csv`, `export_report`, `export_vendedor`, `print_ticket` (genera la boleta en imagen con GD + `imagettftext`), `manual_cleanup` (limpieza manual de reservas vencidas; el cron está desactivado a propósito), `restore_data`, `dm_boleta_preview`.
+`update_reserva`, `liberar_reserva`, `delete_reserva`, `export_csv`, `export_report` (vendedores **de una rifa**, requiere `rifa_id`), `export_vendedor`, `print_ticket` (genera la boleta en imagen con GD + `imagettftext`), `manual_cleanup` (limpieza manual de reservas vencidas; el cron está desactivado a propósito), `restore_data`, `dm_boleta_preview`.
 
 ---
 
@@ -124,6 +128,10 @@ En producción existe además la carpeta `Google_Sans_Flex/` (fuente para las bo
   - Fuera: asignación de números a vendedores, "Reportar venta física", auto-asignar 10, columna y botones "Física"/"Venta", mensaje de WhatsApp de números asignados, selector "Modelo de venta" (Mixto/Virtual), filtro y convención "Venta Física" en el front, estado `asignado`. Reportes muestran siempre efectivo/transferencia.
   - Migración única `migrar_sin_venta_fisica()` para los números que quedaban en `asignado`.
   - Contexto: la asignación física tenía un bug desde feb-2026 (JS de `updateHiddenNumeros()` corrupto → se liberaban todos los números del vendedor). Se corrigió en un commit y luego se eliminó la función completa. Ese handler era el único que liberaba con `vendedor_id = 0`: en datos anteriores a 2.0.0, `estado='disponible' AND vendedor_id = 0` identifica números liberados por él.
+  - **Vendedores por rifa:** columna `rifa_id` + migración; listado, dashboard, exportación y detalle de reserva filtrados por rifa; borrar un vendedor solo si no tiene reservas ni arqueos. Eliminado `page_reportes()` (consolidado, sin menú y roto).
+  - **Link por vendedor** (`?v=ID`) con botón "🔗 Link" y guía WA que lo incluye.
+  - **Reserva atómica** en `ajax_reservar()`: sin choques entre compradores simultáneos; valida vendedor y forma de pago.
+  - Assets del front versionados con `$this->version` (antes `1.2.5` fijo: el navegador podía usar JS/CSS viejos).
   - Limpieza: quitado `display_errors`/`error_reporting(E_ALL)` y logs de depuración de `page_vendedores()` (incluido un log de `$_POST` completo); la consulta de la "Guía WA" ya no se repite por cada vendedor; `esc_url` en el enlace de la guía.
 
 ---
@@ -138,14 +146,17 @@ En producción existe además la carpeta `Google_Sans_Flex/` (fuente para las bo
 - [ ] `status` de reservas es VARCHAR(12): suficiente para los estados actuales, pero ampliarlo a VARCHAR(20) si se agregan otros.
 - [ ] Limpiar referencias a `pago parcial` / `parcialmente liberado` en `page_compradores`.
 - [ ] Fuente de boletas: el código busca en `assets/fonts/...`, pero la carpeta `Google_Sans_Flex/` está en la raíz del plugin. Verificar qué fuente se está usando realmente y mover la carpeta a `assets/fonts/`.
-- [ ] Condición de carrera en `ajax_reservar()`: validar con `UPDATE ... WHERE estado='disponible'` y filas afectadas.
 - [ ] Revisar consultas N+1 en listados.
+- [ ] Verificar los redirects PRG de arqueos (`wp_redirect` dentro de `page_vendedores()` se ejecuta después de que WordPress imprimió la cabecera del admin; depende del `output_buffering` del servidor). Si falla, mover esos handlers a `admin_init`/`admin_post_*`.
+- [ ] Dashboard: solo lista rifas activas; permitir consultar rifas cerradas.
+- [ ] Si la página de la rifa usa caché (LiteSpeed/hosting), excluir el parámetro `v` o la página para que el link por vendedor funcione.
 - [ ] Quedan `error_log` de depuración en `admin_post_print_ticket()` (se escriben en cada boleta generada): limpiar.
 - [ ] Columna `modo_venta` obsoleta en `dm_rifas`: se puede eliminar más adelante con una migración.
 - [ ] El archivo principal tiene zonas con indentación inconsistente (formateo parcial): normalizar en un commit aparte, sin cambios de lógica.
 - [ ] Mover estilos inline del admin a `admin.css`.
 
 **Ideas**
+- [ ] Expiración automática de reservas vencidas (hoy es manual).
 - [ ] Mostrar QR de Nequi en la confirmación (`nequi_qr_url`).
 - [ ] Recordatorio de pago por WhatsApp desde el admin.
 - [ ] Despliegue automático con GitHub Actions al crear un tag.

@@ -127,7 +127,7 @@
         var nombre = $wrap.find('.dm-nombre').val().trim();
         var email = $wrap.find('.dm-email').val().trim();
         var tel = $wrap.find('.dm-telefono').val().trim();
-        var venId = $('.dm-vendedor').val() || 0;
+        var venId = $wrap.find('.dm-vendedor').val() || 0;
         var formaPago = $wrap.find('input[name="dm-forma-pago"]:checked').val() || 'transferencia';
 
         if (sel.length === 0) { $wrap.find('.dm-msg').text('Selecciona al menos un numero.').css('color', 'red'); return; }
