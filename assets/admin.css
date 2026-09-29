@@ -1,0 +1,33 @@
+/* simplified Admin styles for DM Rifa Boletas */
+.postbox h2 {
+    border-bottom: 1px solid #f0f0f1;
+    padding-bottom: 10px;
+}
+
+#dm-ticket-preview-container {
+    transition: all 0.3s ease;
+}
+
+#dm-preview-img {
+    max-width: 100%;
+    height: auto;
+    border: 1px solid #ccd0d4;
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
+    background: #fff;
+}
+
+.dm-loading-preview {
+    color: #2271b1;
+    font-weight: 500;
+}
+
+.preview-hint {
+    font-style: italic;
+    margin-top: 10px;
+}
+
+.dashicons-text-fixed {
+    font-size: 20px;
+    width: 20px;
+    height: 20px;
+}

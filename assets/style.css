@@ -7,18 +7,22 @@
     --rifa-border: #e2e8f0;
     --rifa-text: #1e293b;
     --rifa-text-muted: #64748b;
-    
+
     --rifa-status-available: #f1f5f9;
     --rifa-status-available-border: #cbd5e1;
-    
-    --rifa-status-reserved: #fefce8;
-    --rifa-status-reserved-border: #fef08a;
-    --rifa-status-reserved-text: #854d0e;
-    
-    --rifa-status-paid: #f0fdf4;
-    --rifa-status-paid-border: #bbf7d0;
-    --rifa-status-paid-text: #166534;
-    
+
+    --rifa-status-reserved: #fbbf24;
+    --rifa-status-reserved-border: #d97706;
+    --rifa-status-reserved-text: #ffffff;
+
+    --rifa-status-paid: #22c55e;
+    --rifa-status-paid-border: #16a34a;
+    --rifa-status-paid-text: #ffffff;
+
+    --rifa-status-assigned: #ec4899;
+    --rifa-status-assigned-border: #be185d;
+    --rifa-status-assigned-text: #ffffff;
+
     --rifa-selected: #dbeafe;
     --rifa-selected-border: #3b82f6;
     --rifa-selected-text: #1e40af;
@@ -45,13 +49,58 @@
     border-bottom: 1px solid var(--rifa-border);
 }
 
-.dm-rifa-controls input, 
+.dm-rifa-controls input,
 .dm-rifa-controls select {
     padding: 0.6rem 1rem;
     border: 1px solid var(--rifa-border);
     border-radius: 8px;
     font-size: 0.95rem;
     background: var(--rifa-bg);
+}
+
+.dm-convenciones {
+    display: flex;
+    gap: 25px;
+    flex-wrap: nowrap;
+    /* Forzamos una sola fila en escritorio */
+    margin-bottom: 30px;
+    padding: 20px;
+    background: var(--rifa-bg-alt) !important;
+    border-radius: 12px;
+    border: 1px solid var(--rifa-border);
+    font-size: 1rem;
+    justify-content: center;
+    overflow-x: auto;
+    /* Scroll horizontal si no cabe en móviles */
+    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05);
+}
+
+.dm-convencion-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    white-space: nowrap;
+    font-weight: 600;
+    color: var(--rifa-text);
+}
+
+.dm-convencion-color {
+    display: inline-block;
+    width: 32px;
+    height: 32px;
+    border-radius: 8px;
+    flex-shrink: 0;
+    box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+    border: 1px solid rgba(0, 0, 0, 0.05);
+}
+
+/* Ajuste para móviles */
+@media (max-width: 768px) {
+    .dm-convenciones {
+        flex-wrap: wrap;
+        gap: 15px;
+        justify-content: flex-start;
+    }
 }
 
 .dm-rifa-controls input:focus {
@@ -88,11 +137,15 @@
     border-radius: 10px;
     cursor: pointer;
     transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    -webkit-appearance: none;
+    -moz-appearance: none;
+    appearance: none;
+    box-sizing: border-box;
 }
 
 .dm-cell:hover:not([aria-disabled="true"]) {
     transform: translateY(-2px);
-    box-shadow: 0 4px 12px rgba(0,0,0,0.05);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.05);
     border-color: var(--rifa-primary);
 }
 
@@ -104,17 +157,24 @@
 }
 
 .dm-cell.is-reservado {
-    background: var(--rifa-status-reserved);
-    border-color: var(--rifa-status-reserved-border);
-    color: var(--rifa-status-reserved-text);
+    background: var(--rifa-status-reserved) !important;
+    border-color: var(--rifa-status-reserved-border) !important;
+    color: var(--rifa-status-reserved-text) !important;
     cursor: not-allowed;
-    opacity: 0.8;
+    opacity: 1;
 }
 
 .dm-cell.is-pagado {
-    background: var(--rifa-status-paid);
-    border-color: var(--rifa-status-paid-border);
-    color: var(--rifa-status-paid-text);
+    background: var(--rifa-status-paid) !important;
+    border-color: var(--rifa-status-paid-border) !important;
+    color: var(--rifa-status-paid-text) !important;
+    cursor: not-allowed;
+}
+
+.dm-cell.is-asignado {
+    background: var(--rifa-status-assigned) !important;
+    border-color: var(--rifa-status-assigned-border) !important;
+    color: var(--rifa-status-assigned-text) !important;
     cursor: not-allowed;
 }
 
@@ -125,7 +185,10 @@
     border: 1px solid var(--rifa-border);
 }
 
-.dm-form h3 { margin-top: 0; margin-bottom: 1.5rem; }
+.dm-form h3 {
+    margin-top: 0;
+    margin-bottom: 1.5rem;
+}
 
 .dm-form label {
     display: block;
@@ -133,13 +196,21 @@
     font-weight: 500;
 }
 
-.dm-form input {
+.dm-form input,
+.dm-form select {
     margin-top: 0.4rem;
     width: 100%;
     padding: 0.8rem 1rem;
     border: 1px solid var(--rifa-border);
     border-radius: 8px;
     font-size: 1rem;
+    background: #ffffff;
+    color: var(--rifa-text);
+}
+
+.dm-form select option {
+    background: #1a1a2e;
+    color: white;
 }
 
 .dm-form button.dm-continuar {
@@ -167,7 +238,10 @@
     text-align: center;
 }
 
-.dm-msg:not(:empty) { background: #fee2e2; color: #991b1b; }
+.dm-msg:not(:empty) {
+    background: #fee2e2;
+    color: #991b1b;
+}
 
 .dm-rifa-confirm {
     max-width: 600px;
@@ -179,10 +253,201 @@
     text-align: center;
 }
 
-.dm-rifa-confirm h2 { color: var(--rifa-status-paid-text); margin-top: 0; }
+.dm-rifa-confirm h2 {
+    color: var(--rifa-status-paid-text);
+    margin-top: 0;
+}
 
 @media (max-width: 640px) {
-    .dm-rifa-wrap { padding: 1rem; }
-    .dm-grid { grid-template-columns: repeat(auto-fill, minmax(60px, 1fr)); }
-    .dm-contador { margin-left: 0; width: 100%; text-align: center; }
+    .dm-rifa-wrap {
+        padding: 1rem;
+    }
+
+    .dm-grid {
+        grid-template-columns: repeat(auto-fill, minmax(60px, 1fr));
+    }
+
+    .dm-contador {
+        margin-left: 0;
+        width: 100%;
+        text-align: center;
+    }
+}
+
+/* Visual Ticket Editor Modal */
+#dm-ticket-editor-modal {
+    display: none;
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.85);
+    z-index: 99999;
+}
+
+.dm-editor-content {
+    position: absolute;
+    top: 20px;
+    left: 20px;
+    right: 20px;
+    bottom: 20px;
+    background: #f0f0f1;
+    display: flex;
+    flex-direction: column;
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+.dm-editor-header {
+    padding: 15px 20px;
+    background: #fff;
+    border-bottom: 1px solid #dcdcde;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.dm-editor-header h2 {
+    margin: 0;
+}
+
+.dm-editor-body {
+    flex-grow: 1;
+    overflow: auto;
+    padding: 40px;
+    display: flex;
+    justify-content: center;
+    background: #ccc;
+    position: relative;
+}
+
+#dm-canvas-container {
+    background-size: contain;
+    background-repeat: no-repeat;
+    box-shadow: 0 0 20px rgba(0, 0, 0, 0.3);
+    position: relative;
+    cursor: default;
+}
+
+.dm-draggable-text {
+    position: absolute;
+    padding: 5px 10px;
+    background: rgba(255, 255, 255, 0.8);
+    border: 2px dashed #007cba;
+    color: #000;
+    font-weight: bold;
+    cursor: move;
+    user-select: none;
+    white-space: nowrap;
+    border-radius: 4px;
+    font-family: monospace;
+    font-size: 20px;
+    box-shadow: 0 2px 5px rgba(0, 0, 0, 0.1);
+}
+
+.dm-draggable-text:hover {
+    background: #fff;
+    border-style: solid;
+}
+
+.dm-editor-footer {
+    padding: 15px 20px;
+    background: #fff;
+    border-top: 1px solid #dcdcde;
+    display: flex;
+    justify-content: flex-end;
+    align-items: center;
+}
+
+.dm-close-modal {
+    font-size: 24px;
+    cursor: pointer;
+    background: none;
+    border: none;
+    line-height: 1;
+}
+
+
+/* Boleta Editor Step Navigation */
+.dm-steps-nav {
+    display: flex;
+    gap: 10px;
+    margin-bottom: 20px;
+    background: #fff;
+    padding: 10px;
+    border-radius: 8px;
+    border: 1px solid #dcdcde;
+}
+
+.dm-step-item {
+    flex: 1;
+    padding: 12px;
+    text-align: center;
+    background: #f0f0f1;
+    border-radius: 6px;
+    cursor: pointer;
+    font-weight: 600;
+    color: #64748b;
+    transition: all 0.2s;
+    border: 1px solid transparent;
+}
+
+.dm-step-item.active {
+    background: var(--rifa-primary);
+    color: white;
+}
+
+.dm-step-item.disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.dm-step-content {
+    display: none;
+    background: #fff;
+    padding: 20px;
+    border-radius: 8px;
+    border: 1px solid #dcdcde;
+    animation: fadeIn 0.3s ease-in-out;
+}
+
+.dm-step-content.active {
+    display: block;
+}
+
+@keyframes fadeIn {
+    from {
+        opacity: 0;
+        transform: translateY(5px);
+    }
+
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+/* Designer Enhancements */
+.dm-draggable-text .dm-label-part {
+    font-size: 0.8em;
+    opacity: 0.7;
+    margin-right: 5px;
+}
+
+.dm-draggable-text .dm-value-part {
+    text-decoration: underline;
+}
+
+/* Preview Styles */
+#dm-ticket-preview-container {
+    max-width: 500px;
+    margin: 0 auto;
+    border: 5px solid #fff;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+}
+
+#dm-ticket-preview-container img {
+    display: block;
+    width: 100%;
 }

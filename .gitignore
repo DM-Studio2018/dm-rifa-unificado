@@ -1,0 +1,18 @@
+# Sistema
+.DS_Store
+
+# Scripts de mantenimiento de un solo uso (nunca subir a producción)
+ejecutar-sql.php
+update-boletas.php
+fix-*.php
+cleanup-db.php
+clear-opcache.php
+*.sql
+
+# Datos, logs y pruebas
+*.csv
+*.log
+boleta-*.jpg
+captura.png
+dashboard.png
+*.zip
