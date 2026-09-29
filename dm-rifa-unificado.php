@@ -3750,7 +3750,13 @@ Apenas confirme el pago, activo los números y se genera la boleta digital para 
             <div class="dm-form">
                 <h3>Datos del comprador</h3>
                 <?php
-                // Link personal del vendedor (?v=ID): la venta queda a su nombre automáticamente
+                // Equipo de vendedores de esta rifa (para el buscador)
+                $equipo = $wpdb->get_results($wpdb->prepare(
+                    "SELECT id, nombre FROM {$this->tbl_vendedores} WHERE rifa_id = %d ORDER BY nombre ASC",
+                    $rifa_id
+                ));
+
+                // Link personal del vendedor (?v=ID): llega preseleccionado, pero se puede cambiar
                 $vendedor_link = null;
                 $v_param = intval($_GET['v'] ?? 0);
                 if ($v_param > 0 && $this->vendedor_es_de_rifa($v_param, $rifa_id)) {
@@ -3766,28 +3772,38 @@ Apenas confirme el pago, activo los números y se genera la boleta digital para 
                         (id <?php echo intval($rifa_id); ?>), por eso el link no lo asigna. Revisa en Vendedores a qué rifa pertenece.
                     </p>
                 <?php endif;
-                if ($vendedor_link):
+
+                if ($equipo):
+                    $lista_js = array();
+                    foreach ($equipo as $v) {
+                        $lista_js[] = array('id' => intval($v->id), 'n' => $v->nombre);
+                    }
+                    $uid = 'dm-vend-' . intval($rifa_id);
                     ?>
-                    <input type="hidden" class="dm-vendedor" value="<?php echo intval($vendedor_link->id); ?>">
-                    <p class="dm-vendedor-fijo">Vendedor: <strong><?php echo esc_html($vendedor_link->nombre); ?></strong></p>
-                <?php else:
-                    // Solo el equipo de esta rifa
-                    $vendedores = $wpdb->get_results($wpdb->prepare(
-                        "SELECT id, nombre FROM {$this->tbl_vendedores} WHERE rifa_id = %d ORDER BY nombre ASC",
-                        $rifa_id
-                    ));
-                    if ($vendedores):
-                        ?>
-                        <label>Vendedor responsable<br>
-                            <select class="dm-vendedor">
-                                <option value="">(Elegir vendedor)</option>
-                                <?php foreach ($vendedores as $v): ?>
-                                    <option value="<?php echo intval($v->id); ?>"><?php echo esc_html($v->nombre); ?></option>
-                                <?php endforeach; ?>
-                            </select>
-                        </label>
-                    <?php endif;
-                endif; ?>
+                    <div class="dm-vend-picker" data-vendedores="<?php echo esc_attr(wp_json_encode($lista_js)); ?>">
+                        <span class="dm-vend-titulo">Vendedor que te atendió</span>
+
+                        <div class="dm-vend-elegido" <?php echo $vendedor_link ? '' : 'hidden'; ?>>
+                            <span>✔ <strong class="dm-vend-nombre"><?php echo $vendedor_link ? esc_html($vendedor_link->nombre) : ''; ?></strong></span>
+                            <button type="button" class="dm-vend-cambiar">Cambiar</button>
+                        </div>
+
+                        <div class="dm-vend-buscar" <?php echo $vendedor_link ? 'hidden' : ''; ?>>
+                            <div class="dm-vend-combo">
+                                <input type="text" class="dm-vend-q" id="<?php echo esc_attr($uid); ?>-q"
+                                    placeholder="Escribe el nombre o apellido del vendedor" autocomplete="off"
+                                    role="combobox" aria-autocomplete="list" aria-expanded="false"
+                                    aria-controls="<?php echo esc_attr($uid); ?>-lista" aria-label="Buscar vendedor">
+                                <ul class="dm-vend-lista" id="<?php echo esc_attr($uid); ?>-lista" role="listbox" hidden></ul>
+                            </div>
+                            <label class="dm-vend-ninguno-label">
+                                <input type="checkbox" class="dm-vend-ninguno"> Compro sin vendedor
+                            </label>
+                        </div>
+
+                        <input type="hidden" class="dm-vendedor" value="<?php echo $vendedor_link ? intval($vendedor_link->id) : ''; ?>">
+                    </div>
+                <?php endif; ?>
                 <label>Nombre<br><input type="text" class="dm-nombre"></label>
                 <label>Email (opcional)<br><input type="email" class="dm-email"></label>
                 <label>Teléfono<br><input type="tel" class="dm-telefono"></label>

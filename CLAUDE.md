@@ -102,7 +102,7 @@ En producción existe además la carpeta `Google_Sans_Flex/` (fuente para las bo
 ## Funcionalidades
 
 **Front (shortcodes)**
-- `[rifa_selector id="X"]` — grilla de números, buscador, filtros, selección, formulario del comprador y reserva por AJAX (`dm_rifa_reservar`). Refresca estados con `dm_rifa_get_states`. El desplegable de vendedores muestra solo el equipo de la rifa. **Link personal:** `url_rifa?v=ID` fija el vendedor y oculta el desplegable (`link_vendedor()`). La reserva es atómica (`UPDATE … WHERE estado='disponible'` en transacción).
+- `[rifa_selector id="X"]` — grilla de números, buscador, filtros, selección, formulario del comprador y reserva por AJAX (`dm_rifa_reservar`). Refresca estados con `dm_rifa_get_states`. **Vendedor:** buscador que filtra mientras se escribe (nombre o apellido, sin importar tildes; teclado ↑ ↓ Enter) sobre el equipo de la rifa, más la casilla "Compro sin vendedor". Es obligatorio elegir uno de los dos si la rifa tiene equipo. **Link personal:** `?v=ID` (`link_vendedor()`) llega con el vendedor preseleccionado y un botón "Cambiar". La reserva es atómica (`UPDATE … WHERE estado='disponible'` en transacción).
 - `[rifa_confirm]` — confirmación por token (`?rifa=ID&t=TOKEN`) y botón de WhatsApp con el comprobante.
 
 **Admin — menú "DM Rifas"**
@@ -131,6 +131,7 @@ En producción existe además la carpeta `Google_Sans_Flex/` (fuente para las bo
   - Migración única `migrar_sin_venta_fisica()` para los números que quedaban en `asignado`.
   - Contexto: la asignación física tenía un bug desde feb-2026 (JS de `updateHiddenNumeros()` corrupto → se liberaban todos los números del vendedor). Se corrigió en un commit y luego se eliminó la función completa. Ese handler era el único que liberaba con `vendedor_id = 0`: en datos anteriores a 2.0.0, `estado='disponible' AND vendedor_id = 0` identifica números liberados por él.
   - **Vendedores por rifa:** columna `rifa_id` + migración; listado, dashboard, exportación y detalle de reserva filtrados por rifa; borrar un vendedor solo si no tiene reservas ni arqueos. Eliminado `page_reportes()` (consolidado, sin menú y roto).
+  - **Buscador de vendedor en el front** en lugar del desplegable, con opción "Compro sin vendedor"; el link personal preselecciona y permite cambiar.
   - **Link por vendedor** (`?v=ID`) con botón "🔗 Link" y guía WA que lo incluye. El link usa la página real de la rifa (detectada por el shortcode), no el campo `url_rifa`, que puede quedar desactualizado al reutilizar una página. Si el `?v=` no es del equipo de esa rifa, el administrador ve un aviso en el front.
   - **Reserva atómica** en `ajax_reservar()`: sin choques entre compradores simultáneos; valida vendedor y forma de pago.
   - Assets del front versionados con `$this->version` (antes `1.2.5` fijo: el navegador podía usar JS/CSS viejos).

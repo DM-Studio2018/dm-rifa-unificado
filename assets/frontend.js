@@ -54,11 +54,141 @@
     });
   }
 
+  // ---------- Buscador de vendedor (nombre o apellido, sin importar tildes) ----------
+  function normTxt(s) {
+    return (s || '').toString().normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().trim();
+  }
+
+  function initVendPicker($wrap) {
+    var $p = $wrap.find('.dm-vend-picker');
+    if (!$p.length) { return; }
+
+    var lista = $p.data('vendedores') || [];
+    if (typeof lista === 'string') { try { lista = JSON.parse(lista); } catch (e) { lista = []; } }
+    lista.forEach(function (v) { v.k = normTxt(v.n); v.w = v.k.split(/\s+/); });
+
+    var $q = $p.find('.dm-vend-q');
+    var $ul = $p.find('.dm-vend-lista');
+    var $hid = $p.find('.dm-vendedor');
+    var $ninguno = $p.find('.dm-vend-ninguno');
+    var $elegido = $p.find('.dm-vend-elegido');
+    var $buscar = $p.find('.dm-vend-buscar');
+    var activo = -1;
+    var resultados = [];
+
+    function cerrar() {
+      $ul.attr('hidden', true).empty();
+      $q.attr('aria-expanded', 'false').removeAttr('aria-activedescendant');
+      activo = -1;
+    }
+
+    function buscar(texto) {
+      var t = normTxt(texto);
+      if (!t) { return []; }
+      var partes = t.split(/\s+/);
+      var out = [];
+      lista.forEach(function (v) {
+        // Cada palabra escrita debe aparecer en el nombre; puntúa más si empieza una palabra
+        var puntos = 0;
+        for (var i = 0; i < partes.length; i++) {
+          var p = partes[i];
+          if (v.k.indexOf(p) === -1) { return; }
+          var inicio = v.w.some(function (w) { return w.indexOf(p) === 0; });
+          puntos += inicio ? 2 : 1;
+        }
+        if (v.k.indexOf(t) === 0) { puntos += 3; }
+        out.push({ v: v, puntos: puntos });
+      });
+      out.sort(function (a, b) { return b.puntos - a.puntos || a.v.k.localeCompare(b.v.k); });
+      return out.slice(0, 8).map(function (x) { return x.v; });
+    }
+
+    function pintar() {
+      $ul.empty();
+      var base = $ul.attr('id');
+      if (!resultados.length) {
+        $ul.append($('<li class="dm-vend-vacio" role="option" aria-disabled="true"></li>').text('No encontramos ese vendedor'));
+      }
+      resultados.forEach(function (v, i) {
+        $('<li role="option" class="dm-vend-op"></li>')
+          .attr('id', base + '-op' + i)
+          .attr('data-i', i)
+          .attr('aria-selected', i === activo ? 'true' : 'false')
+          .toggleClass('is-activo', i === activo)
+          .text(v.n)
+          .appendTo($ul);
+      });
+      $ul.removeAttr('hidden');
+      $q.attr('aria-expanded', 'true');
+      if (activo >= 0) { $q.attr('aria-activedescendant', base + '-op' + activo); }
+    }
+
+    function elegir(v) {
+      $hid.val(v.id);
+      $ninguno.prop('checked', false);
+      $elegido.find('.dm-vend-nombre').text(v.n);
+      $elegido.removeAttr('hidden');
+      $buscar.attr('hidden', true);
+      $q.val('');
+      cerrar();
+      $wrap.find('.dm-msg').text('');
+    }
+
+    $q.on('input', function () {
+      $hid.val('');
+      if ($q.val().trim()) { $ninguno.prop('checked', false); }
+      resultados = buscar($q.val());
+      activo = resultados.length ? 0 : -1;
+      if (!$q.val().trim()) { cerrar(); return; }
+      pintar();
+    });
+
+    $q.on('keydown', function (e) {
+      if ($ul.is('[hidden]')) { return; }
+      if (e.key === 'ArrowDown') { e.preventDefault(); activo = Math.min(activo + 1, resultados.length - 1); pintar(); }
+      else if (e.key === 'ArrowUp') { e.preventDefault(); activo = Math.max(activo - 1, 0); pintar(); }
+      else if (e.key === 'Enter') { e.preventDefault(); if (resultados[activo]) { elegir(resultados[activo]); } }
+      else if (e.key === 'Escape') { cerrar(); }
+    });
+
+    // mousedown para elegir antes de que el blur cierre la lista
+    $ul.on('mousedown', '.dm-vend-op', function (e) {
+      e.preventDefault();
+      var v = resultados[parseInt($(this).attr('data-i'), 10)];
+      if (v) { elegir(v); }
+    });
+
+    $q.on('blur', function () { setTimeout(cerrar, 150); });
+
+    $ninguno.on('change', function () {
+      if (this.checked) { $hid.val(''); $q.val(''); cerrar(); $wrap.find('.dm-msg').text(''); }
+    });
+
+    $p.find('.dm-vend-cambiar').on('click', function () {
+      $hid.val('');
+      $elegido.attr('hidden', true);
+      $buscar.removeAttr('hidden');
+      $q.trigger('focus');
+    });
+  }
+
+  // Devuelve '' si todo bien, o el mensaje de error
+  function validarVendedor($wrap) {
+    var $p = $wrap.find('.dm-vend-picker');
+    if (!$p.length) { return ''; }
+    if ($p.find('.dm-vendedor').val()) { return ''; }
+    if ($p.find('.dm-vend-ninguno').is(':checked')) { return ''; }
+    return $p.find('.dm-vend-q').val().trim()
+      ? 'Elige al vendedor de la lista de sugerencias, o marca "Compro sin vendedor".'
+      : 'Escribe el nombre de tu vendedor, o marca "Compro sin vendedor".';
+  }
+
   $(function () {
     $('.dm-rifa-wrap').each(function () {
       var $wrap = $(this);
       var rifa = parseInt($wrap.data('rifa'), 10);
       $wrap.data('sel', []);
+      initVendPicker($wrap);
 
       // Función para renderizar con datos frescos
       var render = function (map) {
@@ -133,6 +263,13 @@
         if (sel.length === 0) { $wrap.find('.dm-msg').text('Selecciona al menos un numero.').css('color', 'red'); return; }
         if (!nombre) { $wrap.find('.dm-msg').text('Ingresa tu nombre.').css('color', 'red'); return; }
         if (!tel) { $wrap.find('.dm-msg').text('Ingresa tu telefono.').css('color', 'red'); return; }
+        var errVend = validarVendedor($wrap);
+        if (errVend) {
+          $wrap.find('.dm-msg').text(errVend).css('color', 'red');
+          var $vq = $wrap.find('.dm-vend-q:visible');
+          if ($vq.length) { $vq.trigger('focus'); }
+          return;
+        }
 
         $wrap.find('.dm-msg').text('Procesando reserva...').css('color', '#666').show();
         $wrap.find('.dm-continuar').prop('disabled', true).css('opacity', '0.5');
